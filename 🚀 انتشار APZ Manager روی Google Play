@@ -1,0 +1,1341 @@
+
+---
+
+📋 فهرست
+
+1. آماده‌سازی پیش‌نیازها
+2. ساخت Keystore
+3. پیکربندی امضای Release
+4. ساخت AAB نهایی
+5. Privacy Policy
+6. Store Listing
+7. Data Safety Form
+8. Content Rating
+9. آپلود در Play Console
+10. CI/CD با GitHub Actions
+11. Fastlane (اختیاری)
+12. گزینه‌های جایگزین
+13. ریسک‌های احتمالی Play
+
+---
+
+1. آماده‌سازی پیش‌نیازها
+
+1.1 حساب Google Play Developer
+
+· هزینه: ۲۵ دلار (یک‌بار برای همیشه)
+· لینک: https://play.google.com/console/signup
+· تأیید هویت: نیاز به کارت اعتباری + مدارک هویتی
+· زمان: ۲۴-۴۸ ساعت برای تأیید
+
+1.2 الزامات جدید Google Play (۲۰۲۴+)
+
+مورد الزام
+Target SDK حداقل ۳۴ (Android 14)
+App Bundle AAB (نه APK) برای اپ جدید
+Data Safety فرم کامل پُر شود
+Privacy Policy لینک معتبر
+Content Rating پرسشنامه تکمیل
+Developer Verification هویت تأیید شده
+Test Track حداقل ۱۲ تستر برای ۱۴ روز قبل از Production (برای حساب‌های جدید فردی)
+
+1.3 بررسی‌های پیش از انتشار
+
+```bash
+# در پروژه‌ی Android
+cd apz-android
+
+# بررسی lint
+./gradlew :app:lint
+
+# تست‌ها
+./gradlew :app:testDebugUnitTest
+
+# ساخت debug APK برای تست دستی
+./gradlew :app:assembleDebug
+```
+
+---
+
+2. ساخت Keystore
+
+⚠️ این فایل را گم نکنید! اگر گم شود دیگر نمی‌توانید اپ را آپدیت کنید.
+
+2.1 ساخت Keystore
+
+```bash
+mkdir -p ~/apz-keys
+cd ~/apz-keys
+
+keytool -genkeypair -v \
+    -keystore apz-release.jks \
+    -alias apz \
+    -keyalg RSA \
+    -keysize 4096 \
+    -validity 10000 \
+    -storetype JKS \
+    -dname "CN=APZ Security, OU=Mobile, O=APZ, L=Tehran, ST=Tehran, C=IR"
+```
+
+سؤالات:
+
+· Keystore password: رمز قوی ۱۶+ کاراکتر
+· Key password: می‌تواند همان باشد
+
+2.2 بازیابی اطلاعات
+
+```bash
+keytool -list -v -keystore apz-release.jks -alias apz
+```
+
+2.3 پشتیبان‌گیری امن
+
+```bash
+# رمزنگاری با GPG
+gpg -c apz-release.jks
+
+# آپلود به ۳ مکان مختلف:
+# 1) 1Password / Bitwarden
+# 2) S3 با KMS encryption
+# 3) USB آفلاین در جای امن
+```
+
+2.4 انتقال به GitHub Secrets
+
+```bash
+# Base64 از keystore
+base64 -w0 apz-release.jks > keystore.b64
+
+# در GitHub → Settings → Secrets → Actions:
+# KEYSTORE_BASE64 = محتوای فایل keystore.b64
+# KEYSTORE_PASSWORD = رمز keystore
+# KEY_ALIAS = apz
+# KEY_PASSWORD = رمز کلید
+```
+
+---
+
+3. پیکربندی امضای Release
+
+3.1 ساخت keystore.properties
+
+```properties
+# keystore.properties (در .gitignore قرار دهید!)
+storeFile=/home/user/apz-keys/apz-release.jks
+storePassword=YOUR_KEYSTORE_PASSWORD
+keyAlias=apz
+keyPassword=YOUR_KEY_PASSWORD
+```
+
+3.2 اضافه به .gitignore
+
+```gitignore
+# Android signing
+keystore.properties
+*.jks
+*.keystore
+apz-keys/
+```
+
+3.3 به‌روزرسانی app/build.gradle.kts
+
+```kotlin
+import java.util.Properties
+
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("org.jetbrains.kotlin.plugin.compose")
+    id("com.chaquo.python")
+}
+
+// خواندن keystore.properties
+val keystorePropsFile = rootProject.file("keystore.properties")
+val keystoreProps = Properties().apply {
+    if (keystorePropsFile.exists()) {
+        load(keystorePropsFile.inputStream())
+    }
+}
+
+android {
+    namespace = "com.apz.manager"
+    compileSdk = 34
+
+    defaultConfig {
+        applicationId = "com.apz.manager"
+        minSdk = 24
+        targetSdk = 34
+        versionCode = 1
+        versionName = "1.0.0"
+
+        vectorDrawables { useSupportLibrary = true }
+
+        ndk {
+            abiFilters += listOf("arm64-v8a", "x86_64")
+        }
+
+        python {
+            version = "3.11"
+            pip {
+                install("androguard==4.1.2")
+                install("yara-python==4.5.1")
+                install("pyyaml==6.0.2")
+                install("requests==2.32.3")
+            }
+        }
+    }
+
+    signingConfigs {
+        create("release") {
+            if (keystorePropsFile.exists()) {
+                storeFile = file(keystoreProps["storeFile"] as String)
+                storePassword = keystoreProps["storePassword"] as String
+                keyAlias = keystoreProps["keyAlias"] as String
+                keyPassword = keystoreProps["keyPassword"] as String
+            }
+            // Play App Signing: نیازی به v1 نیست
+            enableV1Signing = false
+            enableV2Signing = true
+            enableV3Signing = true
+            enableV4Signing = true
+        }
+    }
+
+    buildTypes {
+        release {
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro"
+            )
+            signingConfig = signingConfigs.getByName("release")
+
+            // برای Play Store
+            isDebuggable = false
+            isJniDebuggable = false
+            isPseudoLocalesEnabled = false
+        }
+
+        debug {
+            applicationIdSuffix = ".debug"
+            versionNameSuffix = "-debug"
+            isMinifyEnabled = false
+        }
+    }
+
+    // Bundle splits برای کاهش حجم
+    bundle {
+        language { enableSplit = true }
+        density { enableSplit = true }
+        abi { enableSplit = true }
+    }
+
+    compileOptions {
+        sourceCompatibility = JavaVersion.VERSION_17
+        targetCompatibility = JavaVersion.VERSION_17
+    }
+    kotlinOptions { jvmTarget = "17" }
+    buildFeatures {
+        compose = true
+        buildConfig = true
+    }
+    packaging {
+        resources {
+            excludes += setOf(
+                "META-INF/*.kotlin_module",
+                "META-INF/DEPENDENCIES",
+                "META-INF/LICENSE*",
+                "META-INF/NOTICE*",
+                "META-INF/*.md",
+                "**/kotlin/**",
+                "**/*.kotlin_metadata"
+            )
+        }
+    }
+}
+
+dependencies {
+    // ... (بدون تغییر از نسخه‌ی قبلی)
+}
+```
+
+3.4 به‌روزرسانی proguard-rules.pro (محافظت بیشتر)
+
+```proguard
+# APZ Manager – ProGuard Rules
+
+# Chaquopy
+-keep class com.chaquo.python.** { *; }
+-dontwarn com.chaquo.python.**
+-keep class com.apz.manager.data.model.** { *; }
+
+# Gson
+-keepattributes Signature
+-keepattributes *Annotation*
+-keepattributes InnerClasses
+-keepattributes EnclosingMethod
+-keep class sun.misc.Unsafe { *; }
+-keep class com.google.gson.reflect.TypeToken { *; }
+-keep class * extends com.google.gson.reflect.TypeToken
+
+# Coroutines
+-keepclassmembers class kotlinx.coroutines.** { volatile <fields>; }
+-dontwarn kotlinx.coroutines.**
+
+# Compose
+-keep class androidx.compose.** { *; }
+-dontwarn androidx.compose.**
+
+# حذف لاگ‌ها در release
+-assumenosideeffects class android.util.Log {
+    public static *** d(...);
+    public static *** v(...);
+    public static *** i(...);
+}
+
+# حفاظت از مدل‌ها
+-keepnames class com.apz.manager.data.model.** { *; }
+```
+
+---
+
+4. ساخت AAB نهایی
+
+4.1 فرمان ساخت
+
+```bash
+cd apz-android
+
+# پاک‌سازی
+./gradlew clean
+
+# AAB برای Play Store
+./gradlew :app:bundleRelease
+
+# APK برای تست (sideloading)
+./gradlew :app:assembleRelease
+
+# خروجی:
+# app/build/outputs/bundle/release/app-release.aab  ← این را آپلود کنید
+# app/build/outputs/apk/release/app-release.apk    ← برای تست دستی
+```
+
+4.2 بررسی خروجی
+
+```bash
+# حجم
+ls -lh app/build/outputs/bundle/release/app-release.aab
+
+# بررسی امضا
+jarsigner -verify -verbose app/build/outputs/apk/release/app-release.apk
+
+# محتوای AAB
+unzip -l app/build/outputs/bundle/release/app-release.aab | head -40
+```
+
+4.3 تست روی دستگاه
+
+```bash
+# با bundletool
+brew install bundletool  # یا از GitHub
+
+bundletool build-apks \
+    --bundle=app-release.aab \
+    --output=app.apks \
+    --ks=~/apz-keys/apz-release.jks \
+    --ks-pass=pass:YOUR_PASSWORD \
+    --ks-key-alias=apz \
+    --key-pass=pass:YOUR_PASSWORD
+
+# نصب
+bundletool install-apks --apks=app.apks
+```
+
+4.4 کاهش حجم
+
+اگر حجم AAB بالای ۱۰۰ مگابایت است (چون Chaquopy + YARA):
+
+```kotlin
+// در android { }
+androidResources {
+    // حذف زبان‌های غیرضروری
+    localeFilters += listOf("fa", "en")
+}
+```
+
+```kotlin
+// در defaultConfig { }
+resourceConfigurations += listOf("fa", "en", "ldpi", "mdpi", "hdpi", "xhdpi", "xxhdpi")
+
+// فقط ABI مهم‌تر
+ndk {
+    abiFilters += listOf("arm64-v8a")  // حذف x86_64
+}
+```
+
+اگر بیش از ۱۵۰ مگابایت شد → App Bundle اجباری + نیاز به درخواست به Google.
+
+---
+
+5. Privacy Policy
+
+Google Play الزامی می‌کند Privacy Policy داشته باشید.
+
+5.1 محتوای پیشنهادی
+
+فایل docs/PRIVACY_POLICY.md:
+
+```markdown
+# Privacy Policy – APZ Manager
+
+**Last updated:** 2026-10-06
+
+## Introduction
+
+APZ Manager ("the App", "we") is an Android application for analyzing APK files
+for security research and defensive purposes. This Privacy Policy explains how
+we handle your information.
+
+## Data We Do NOT Collect
+
+APZ Manager is designed with privacy as a first principle. **We do not collect,
+transmit, or store any personal data on our servers.** Specifically:
+
+- ❌ No user accounts
+- ❌ No telemetry/analytics
+- ❌ No crash reports to third parties
+- ❌ No advertising IDs
+- ❌ No location data
+- ❌ No contacts, photos, or media access
+
+## Data Processed Locally
+
+The App processes the following **only on your device**:
+
+- **APK files you select for analysis**: copied temporarily to the app's cache,
+  analyzed, then deleted automatically.
+- **Analysis reports**: stored in the app's private SQLite database.
+- **Settings & preferences**: stored in private SharedPreferences.
+
+You can delete all data at any time via Settings or by uninstalling the App.
+
+## Optional Network Features
+
+The following features, **only when explicitly enabled by you**, contact
+external services:
+
+### VirusTotal API (opt-in)
+- **What is sent**: SHA-256 hash of the APK file.
+- **Purpose**: check if the file is known malware.
+- **Their policy**: https://www.virustotal.com/gui/legal/privacy-policy
+
+### MetaDefender Cloud (opt-in)
+- **What is sent**: SHA-256 hash of the APK file.
+- **Purpose**: check if the file is known malware.
+- **Their policy**: https://www.opswat.com/legal/privacy-policy
+
+### Ollama (opt-in, local/self-hosted)
+- **What is sent**: analysis report JSON (no APK content).
+- **Purpose**: AI-generated summary.
+- **Note**: You provide your own Ollama server URL. We do not operate any
+  server.
+
+**None of these features are enabled by default.**
+
+## Permissions
+
+- **INTERNET**: used only for the optional network features above.
+- **ACCESS_NETWORK_STATE**: to detect connectivity.
+- **READ_EXTERNAL_STORAGE**: to open APK files you select.
+- **POST_NOTIFICATIONS**: for optional analysis completion alerts.
+
+## Children's Privacy
+
+The App is not directed to children under 13.
+
+## Security
+
+APK files are never executed. All analysis is static (byte-level inspection).
+
+## Changes
+
+We may update this policy; the "Last updated" date will change.
+
+## Contact
+
+- Email: privacy@apz-security.com
+- GitHub: https://github.com/your-org/apz-manager/issues
+
+## Open Source
+
+APZ Manager is licensed under GPLv3. Source:
+https://github.com/your-org/apz-manager
+```
+
+5.2 میزبانی Privacy Policy
+
+گزینه‌ها:
+
+1. GitHub Pages (ساده‌ترین):
+
+```bash
+cd your-org.github.io  # یا نام repo
+mkdir apz-privacy
+cp PRIVACY_POLICY.md apz-privacy/index.md
+git push
+# URL: https://your-org.github.io/apz-privacy/
+```
+
+2. GitHub Gist: کافی برای Play (کمی غیرحرفه‌ای)
+3. Notion Public Page: سریع ولی وابسته
+4. دامنه‌ی خودتان: best practice
+
+---
+
+6. Store Listing
+
+6.1 متن Store Listing
+
+store-listing/fa-IR/ و store-listing/en-US/:
+
+en-US/short-description.txt (حداکثر ۸۰ کاراکتر):
+
+```
+Offline APK security analyzer with YARA, MITRE ATT&CK & local AI.
+```
+
+en-US/full-description.txt (حداکثر ۴۰۰۰ کاراکتر):
+
+```
+APZ Manager – Comprehensive APK Security Analysis Platform
+
+APZ Manager is a powerful, privacy-first Android app for analyzing APK files
+for security research, malware analysis, and defensive operations. All
+analysis happens ON YOUR DEVICE — no data is sent to our servers.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔍 KEY FEATURES
+
+• Advanced Static Analysis
+  Extract suspicious strings, native libraries, DEX files, and more
+
+• AndroidManifest Decoder
+  Full permission analysis, exported components, security flags
+
+• YARA Scanner
+  Built-in + custom rules for malware detection
+
+• MITRE ATT&CK Mapping
+  Connect findings to known adversary techniques
+
+• IOC Extraction
+  URLs, IPs, domains, hashes extracted automatically
+
+• Explainable Risk Engine
+  7-category weighted scoring with full transparency
+
+• Local AI Analysis (Optional)
+  Connect your own Ollama server for AI-powered summaries
+
+• Multi-Source Reputation (Optional)
+  VirusTotal, MetaDefender integration
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔒 PRIVACY FIRST
+
+• No accounts required
+• No telemetry
+• No ads
+• No data leaves your device (unless YOU enable online features)
+• APK files are NEVER executed — static analysis only
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+👥 WHO IS THIS FOR?
+
+• Security researchers
+• Malware analysts
+• SOC teams
+• Penetration testers
+• Privacy-conscious users
+• Anyone verifying APKs before installation
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚙️ TECHNICAL HIGHLIGHTS
+
+• androguard-based parsing
+• YARA 4.5+ rule engine
+• SQLite history with local-only storage
+• GPLv3 open source
+• No Android SDK required on device
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📖 OPEN SOURCE
+
+Source code: https://github.com/your-org/apz-manager
+License: GPLv3
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+⚠️ DISCLAIMER
+
+APZ Manager is a defensive security tool. It does NOT execute APK files.
+Users are responsible for complying with all applicable laws.
+
+For educational and legitimate security research use only.
+```
+
+fa-IR/short-description.txt:
+
+```
+تحلیل امنیتی APK به‌صورت کاملاً آفلاین با YARA، MITRE و AI محلی.
+```
+
+fa-IR/full-description.txt:
+
+```
+APZ Manager — پلتفرم جامع تحلیل امنیتی APK
+
+یک ابزار قدرتمند و کاملاً حریم‌خصوصی‌محور برای تحلیل فایل‌های APK.
+تمام تحلیل روی دستگاه شما انجام می‌شود — هیچ داده‌ای به سرورهای ما ارسال نمی‌شود.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔍 ویژگی‌های اصلی
+
+• تحلیل ایستای پیشرفته
+  استخراج رشته‌های مشکوک، کتابخانه‌های native، فایل‌های DEX
+
+• دیکودر AndroidManifest
+  تحلیل کامل مجوزها، کامپوننت‌های exported، پرچم‌های امنیتی
+
+• اسکنر YARA
+  قوانین داخلی + قوانین سفارشی برای شناسایی بدافزار
+
+• نگاشت MITRE ATT&CK
+  اتصال یافته‌ها به تکنیک‌های شناخته‌شده
+
+• استخراج IOC
+  URL، IP، دامنه، هش به‌صورت خودکار
+
+• موتور فیوژن ریسک قابل توضیح
+  ۷ دسته شواهد با وزن‌دهی و شفافیت کامل
+
+• تحلیل AI محلی (اختیاری)
+  اتصال به سرور Ollama خودتان
+
+• اعتبارسنجی چندمنبعی (اختیاری)
+  VirusTotal، MetaDefender
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+🔒 حریم خصوصی اول
+
+• بدون نیاز به حساب کاربری
+• بدون telemetry
+• بدون تبلیغات
+• بدون ارسال داده به بیرون (مگر خودتان بخواهید)
+• APK هرگز اجرا نمی‌شود — فقط تحلیل ایستا
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+👥 برای چه کسانی؟
+
+• پژوهشگران امنیت
+• تحلیلگران بدافزار
+• تیم‌های SOC
+• تست‌کنندگان نفوذ
+• کاربران حریم‌خصوصی‌محور
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📖 متن‌باز
+
+کد: https://github.com/your-org/apz-manager
+مجوز: GPLv3
+```
+
+6.2 ساختار پوشه
+
+```
+store-listing/
+├── en-US/
+│   ├── title.txt                    (حداکثر ۳۰ کاراکتر)
+│   ├── short-description.txt        (۸۰ کاراکتر)
+│   ├── full-description.txt         (۴۰۰۰ کاراکتر)
+│   └── release-notes.txt            (۵۰۰ کاراکتر)
+├── fa-IR/
+│   ├── title.txt
+│   ├── short-description.txt
+│   ├── full-description.txt
+│   └── release-notes.txt
+├── graphics/
+│   ├── icon-512.png                 (۵۱۲×۵۱۲ PNG, 32-bit)
+│   ├── feature-graphic-1024x500.png
+│   ├── phone-screenshots/           (حداقل ۲ عدد، ۱۶:۹ یا ۹:۱۶، min 320px)
+│   │   ├── 01-home.png
+│   │   ├── 02-analysis.png
+│   │   ├── 03-report.png
+│   │   ├── 04-history.png
+│   │   └── 05-settings.png
+│   └── tablet-screenshots/          (اختیاری)
+```
+
+en-US/title.txt:
+
+```
+APZ Manager – APK Security
+```
+
+fa-IR/title.txt:
+
+```
+APZ Manager – تحلیل APK
+```
+
+release-notes.txt (برای هر نسخه):
+
+```
+v1.0.0 (Initial release)
+
+• تحلیل ایستای APK با androguard
+• اسکنر YARA با قوانین سفارشی
+• موتور فیوژن ریسک ۷ دسته‌ای
+• نگاشت MITRE ATT&CK
+• تحلیل AI محلی با Ollama
+• اعتبارسنجی VirusTotal و MetaDefender
+• تاریخچه محلی SQLite
+• رابط کاربری کامل فارسی
+```
+
+6.3 اسکرین‌شات‌ها
+
+با Android Emulator:
+
+```bash
+# اجرای اپ
+./gradlew :app:installDebug
+
+# گرفتن اسکرین‌شات از هر صفحه
+adb exec-out screencap -p > phone-screenshots/01-home.png
+```
+
+الزامات:
+
+· ۲ تا ۸ اسکرین‌شات
+· JPG یا PNG 24-bit
+· بین ۳۲۰ تا ۳۸۴۰ پیکسل هر بعد
+· نسبت ۱۶:۹ یا ۹:۱۶
+
+Feature Graphic (اجباری):
+
+· ۱۰۲۴×۵۰۰ پیکسل
+· PNG یا JPG
+· بدون آگهی، بدون rating
+
+---
+
+7. Data Safety Form
+
+این فرم اجباری است. پر کردنش دقیق باید باشد.
+
+7.1 پاسخ‌های پیشنهادی
+
+```yaml
+Data collection and security:
+
+Does your app collect or share any of the required user data types?
+  ➜ Yes (because of optional network features)
+
+Is all of the user data collected by your app encrypted in transit?
+  ➜ Yes
+
+Do you provide a way for users to request that their data is deleted?
+  ➜ Yes (همه‌ی داده محلی است و با uninstall حذف می‌شود)
+
+Data types:
+
+Location:         ➜ NOT collected
+Personal info:    ➜ NOT collected
+Financial info:   ➜ NOT collected
+Health:           ➜ NOT collected
+Messages:         ➜ NOT collected
+Photos and videos:➜ NOT collected
+Audio:            ➜ NOT collected
+Files and docs:   ➜ Collected (transient)
+  • Purpose: App functionality
+  • Ephemeral: Yes (فایل بلافاصله پس از تحلیل پاک می‌شود)
+  • Optional: Yes (کاربر خودش انتخاب می‌کند)
+  • Encrypted in transit: N/A
+  • Can be deleted: Yes
+Calendar:         ➜ NOT collected
+Contacts:         ➜ NOT collected
+App activity:     ➜ NOT collected
+Web browsing:     ➜ NOT collected
+App info and performance: ➜ NOT collected
+Device or other IDs: ➜ NOT collected
+
+Data sharing:
+
+Is data shared with third parties?
+  ➜ Yes (اختیاری - وقتی کاربر فعال می‌کند)
+  • Data type: Device or other IDs (SHA-256)
+  • Shared with: VirusTotal, MetaDefender
+  • Purpose: App functionality (malware lookup)
+  • Optional: Yes (user must enable)
+```
+
+7.2 نکات مهم
+
+· بیش از حد "collect" ننویسید — یا review رد می‌کند
+· ترجیح "Ephemeral" برای APKها (چون فقط در cache موقت)
+· "Optional" را همیشه تیک بزنید
+
+---
+
+8. Content Rating
+
+پرسشنامه‌ی IARC (مشترک بین Google و ESRB و ...).
+
+8.1 پاسخ‌های پیشنهادی
+
+سؤال پاسخ
+Violence No
+Blood No
+Sexual content No
+Nudity No
+Language No
+Controlled substances No
+Gambling No
+User interaction No
+Shares location No
+Digital purchases No
+Security tools / utilities Yes
+
+ممکن است نتیجه: Everyone یا PEGI 3.
+
+---
+
+9. آپلود در Play Console
+
+9.1 گام‌به‌گام
+
+```bash
+# 1) وارد شوید
+open https://play.google.com/console
+
+# 2) Create app
+# Name: APZ Manager
+# Language: English (United States) – یا Persian
+# App or game: App
+# Free or paid: Free
+# Declarations: check both boxes
+```
+
+9.2 پیکربندی
+
+مراحل Play Console (به ترتیب):
+
+1. Dashboard → Set up your app
+2. App access → All functionality available without restrictions
+3. Ads → No, my app does not contain ads
+4. Content rating → پر کردن پرسشنامه
+5. Target audience → 18+ (چون ابزار امنیتی)
+6. News app → No
+7. COVID-19 contact tracing → No
+8. Data safety → پر کردن (بخش ۷)
+9. Government apps → No
+10. Financial features → None
+11. Health → No
+
+9.3 Store Listing
+
+پر کردن:
+
+· Short description
+· Full description
+· App icon (512×512)
+· Feature graphic (1024×500)
+· Phone screenshots (min 2)
+· Privacy Policy URL ← ضروری
+
+9.4 Test Tracks
+
+⚠️ برای حساب‌های جدید فردی:
+
+```
+1. Internal testing (تا ۱۰۰ نفر)   ← شروع از اینجا
+2. Closed testing (حداقل ۱۲ تستر برای ۱۴ روز) ← اجباری برای production
+3. Open testing (اختیاری)
+4. Production                        ← پس از ۱۴ روز
+```
+
+9.5 آپلود نسخه
+
+```bash
+# در Play Console → Testing → Closed testing
+# Create new release
+# Upload app-release.aab
+# Release notes (از store-listing/.../release-notes.txt)
+# Save → Review → Start rollout
+```
+
+---
+
+10. CI/CD با GitHub Actions
+
+10.1 فایل Workflow
+
+.github/workflows/android-release.yml:
+
+```yaml
+name: Android Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          cmdline-tools-version: '11076708'
+
+      - name: Setup Python (for Chaquopy)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+
+      - name: Decode Keystore
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        run: |
+          echo "$KEYSTORE_BASE64" | base64 -d > $RUNNER_TEMP/keystore.jks
+
+      - name: Create keystore.properties
+        run: |
+          cat > keystore.properties <<EOF
+          storeFile=$RUNNER_TEMP/keystore.jks
+          storePassword=${{ secrets.KEYSTORE_PASSWORD }}
+          keyAlias=${{ secrets.KEY_ALIAS }}
+          keyPassword=${{ secrets.KEY_PASSWORD }}
+          EOF
+
+      - name: Extract version
+        id: version
+        run: |
+          VERSION=$(grep -oP 'versionName\s*=\s*"\K[^"]+' app/build.gradle.kts | head -1)
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: Build Release AAB
+        run: ./gradlew :app:bundleRelease --stacktrace
+
+      - name: Build Release APK
+        run: ./gradlew :app:assembleRelease --stacktrace
+
+      - name: Upload AAB Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apz-manager-${{ steps.version.outputs.version }}-aab
+          path: app/build/outputs/bundle/release/app-release.aab
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apz-manager-${{ steps.version.outputs.version }}-apk
+          path: app/build/outputs/apk/release/app-release.apk
+
+      # انتشار در GitHub Releases
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            app/build/outputs/bundle/release/app-release.aab
+            app/build/outputs/apk/release/app-release.apk
+          body_path: store-listing/en-US/release-notes.txt
+          draft: false
+          prerelease: false
+
+      # آپلود به Play Store
+      - name: Upload to Play Store (Internal Track)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: r0adkll/upload-google-play@v1
+        with:
+          serviceAccountJsonPlainText: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+          packageName: com.apz.manager
+          releaseFiles: app/build/outputs/bundle/release/app-release.aab
+          track: internal
+          status: draft
+          whatsNewDirectory: store-listing/en-US/
+          mappingFile: app/build/outputs/mapping/release/mapping.txt
+```
+
+10.2 Service Account برای Play
+
+```bash
+# 1) Google Cloud Console
+# → IAM → Service Accounts → Create
+
+# 2) دانلود JSON key
+
+# 3) Play Console → Setup → API access
+# → Link to Google Cloud project
+# → Grant access to service account:
+#   - Release to testing tracks
+#   - Manage production releases
+#   - Edit store listing
+
+# 4) GitHub Secrets:
+# PLAY_SERVICE_ACCOUNT_JSON = محتوای JSON
+```
+
+---
+
+11. Fastlane (اختیاری)
+
+11.1 نصب
+
+```bash
+brew install fastlane   # macOS
+# یا
+gem install fastlane
+```
+
+11.2 fastlane/Fastfile
+
+```ruby
+default_platform(:android)
+
+platform :android do
+  desc "Build and upload to internal track"
+  lane :internal do
+    gradle(
+      task: "bundle",
+      build_type: "Release",
+      print_command: false,
+      properties: {
+        "android.injected.signing.store.file" => ENV["KEYSTORE_PATH"],
+        "android.injected.signing.store.password" => ENV["KEYSTORE_PASSWORD"],
+        "android.injected.signing.key.alias" => ENV["KEY_ALIAS"],
+        "android.injected.signing.key.password" => ENV["KEY_PASSWORD"],
+      }
+    )
+
+    upload_to_play_store(
+      track: "internal",
+      aab: lane_context[SharedValues::GRADLE_AAB_OUTPUT_PATH],
+      json_key: ENV["PLAY_SERVICE_ACCOUNT_JSON_PATH"],
+      skip_upload_metadata: false,
+      skip_upload_images: true,
+      skip_upload_screenshots: true,
+    )
+  end
+
+  desc "Promote internal → production"
+  lane :promote do
+    upload_to_play_store(
+      track: "internal",
+      track_promote_to: "production",
+      json_key: ENV["PLAY_SERVICE_ACCOUNT_JSON_PATH"],
+      rollout: "0.1",  # 10% rollout
+    )
+  end
+end
+```
+
+11.3 اجرا
+
+```bash
+export KEYSTORE_PATH=~/apz-keys/apz-release.jks
+export KEYSTORE_PASSWORD=xxx
+export KEY_ALIAS=apz
+export KEY_PASSWORD=xxx
+export PLAY_SERVICE_ACCOUNT_JSON_PATH=~/play-sa.json
+
+fastlane internal
+```
+
+---
+
+12. گزینه‌های جایگزین
+
+اگر Play قبول نکرد یا نمی‌خواهید از آن استفاده کنید:
+
+12.1 GitHub Releases (ساده‌ترین)
+
+```bash
+# در CI/CD (خودکار در workflow بالا)
+git tag v1.0.0
+git push origin v1.0.0
+# → GitHub Release خودکار با AAB و APK
+```
+
+مزیت: کاملاً رایگان، بدون محدودیت، فوری.
+عیب: کاربران باید APK را sideload کنند.
+
+12.2 F-Droid (توصیه‌شده برای اپ‌های open source)
+
+```bash
+# Fork F-Droid Data
+git clone https://gitlab.com/fdroid/fdroiddata.git
+cd fdroiddata
+
+# ساخت metadata
+mkdir -p metadata/com.apz.manager
+cat > metadata/com.apz.manager.yml <<'EOF'
+Categories:
+  - Security
+License: GPL-3.0-or-later
+SourceCode: https://github.com/your-org/apz-manager
+IssueTracker: https://github.com/your-org/apz-manager/issues
+Changelog: https://github.com/your-org/apz-manager/releases
+
+AutoName: APZ Manager
+
+RepoType: git
+Repo: https://github.com/your-org/apz-manager.git
+
+Builds:
+  - versionName: 1.0.0
+    versionCode: 1
+    commit: v1.0.0
+    subdir: apz-android
+    gradle:
+      - yes
+    prebuild: |
+      sed -i 's/python {/python {/' app/build.gradle.kts
+    scanignore:
+      - apz-android/app/src/main/python/
+    scandelete:
+      - apz-android/app/src/main/assets/
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: 1.0.0
+CurrentVersionCode: 1
+EOF
+
+# Commit و PR به GitLab
+```
+
+مزیت: سازگار با GPLv3، مخصوص open source.
+عیب: review زمان‌بر (چند هفته).
+
+12.3 Amazon Appstore
+
+· پشتیبانی از APK (نه فقط AAB)
+· بدون هزینه‌ی ثبت برای اپ‌های جدید
+· آسان‌تر از Play برای اپ‌های امنیتی
+
+12.4 Samsung Galaxy Store
+
+· برای Samsung devices
+· ثبت رایگان
+· review سریع‌تر
+
+12.5 APKMirror / APKPure
+
+اگر فقط می‌خواهید توزیع گسترده باشد.
+
+12.6 سایت خودتان
+
+```bash
+# در GitHub Pages
+mkdir -p docs/install
+cat > docs/install/index.md <<'EOF'
+# نصب APZ Manager
+
+## روش ۱: Google Play
+[لینک Play](https://play.google.com/store/apps/details?id=com.apz.manager)
+
+## روش ۲: APK مستقیم
+[دانلود آخرین نسخه](https://github.com/your-org/apz-manager/releases/latest)
+
+## روش ۳: F-Droid
+[F-Droid Repository](https://f-droid.org/packages/com.apz.manager)
+EOF
+```
+
+---
+
+13. ریسک‌های احتمالی Play
+
+⚠️ دلایل احتمالی رد شدن
+
+ریسک دلیل راه‌حل
+Malware category تحلیل APK ممکن است به عنوان ابزار سوءاستفاده دیده شود توضیح دقیق در description
+Permissions READ_EXTERNAL_STORAGE در اپ‌های جدید حساس است استفاده از SAF (که انجام شده)
+QUERY_ALL_PACKAGES برای دیدن اپ‌ها نیازی نیست، حذف شده
+Cybersecurity policy سیاست جدید Play برای ابزارهای امنیتی توضیح هدف defensive
+Min SDK too low 24 ممکن است کافی نباشد بهتر: minSdk=26 (Android 8)
+App size > 150MB Chaquopy + YARA سنگین استفاده از ABI splits
+Target SDK < 34 Play reject 34 (انجام شده)
+Testing requirements ۱۲ تستر × ۱۴ روز closed testing track
+Privacy policy incomplete Data Safety متناقض دقیق پر کنید
+
+🛡️ استراتژی کاهش ریسک
+
+```yaml
+# 1. lower permissions
+permissions: [INTERNET, ACCESS_NETWORK_STATE, POST_NOTIFICATIONS]
+# READ_EXTERNAL_STORAGE حذف شد (SAF کافی است)
+
+# 2. minSdk = 26
+# Android 8 برای ۹۵٪+ دستگاه‌ها کافی است
+
+# 3. feature flag برای "high-risk features"
+# Online reputation پیش‌فرض OFF
+
+# 4. clear disclaimer
+# "Only for security research. Not for executing APK files."
+
+# 5. no "hacking" words in description
+# از "defensive security" استفاده کنید
+```
+
+📝 ایمیل به Play Support
+
+اگر رد شد، ارسال کنید:
+
+```
+Dear Google Play Review Team,
+
+APZ Manager (com.apz.manager) is a DEFENSIVE security tool for
+analyzing APK files. It is designed for:
+
+1. Malware analysts examining suspicious APKs
+2. Security researchers verifying app safety
+3. Privacy-conscious users checking apps before installation
+4. SOC teams conducting triage
+
+Key facts:
+- The app NEVER executes APK files
+- All analysis is static (byte-level inspection)
+- Users must explicitly select each APK
+- No accounts, no telemetry, no ads
+- Open source under GPLv3 (fully auditable)
+- Similar apps: VirusTotal (Google), Hybrid Analysis, Joe Sandbox
+
+The app's purpose is to PROTECT users, not to enable any harm.
+Source code: https://github.com/your-org/apz-manager
+
+We are happy to provide any additional clarification.
+
+Best regards,
+APZ Security Team
+```
+
+---
+
+✅ چک‌لیست نهایی قبل از آپلود
+
+```markdown
+## Pre-Upload Checklist
+
+### Code
+- [ ] versionCode & versionName bump شده
+- [ ] keystore.properties در .gitignore
+- [ ] ProGuard/R8 فعال
+- [ ] Lint clean (0 errors)
+- [ ] همه‌ی تست‌ها pass
+- [ ] minSdk=24+، targetSdk=34
+- [ ] بدون دیتابیس/فایل تستی در bundle
+- [ ] بدون کلید hardcoded
+
+### Signing
+- [ ] Keystore ساخته شده
+- [ ] Keystore در ۳ مکان backup
+- [ ] enrollment در Play App Signing
+- [ ] AAB امضا شده
+
+### Store
+- [ ] Icon 512×512 (PNG 32-bit)
+- [ ] Feature graphic 1024×500
+- [ ] حداقل ۲ اسکرین‌شات (phone)
+- [ ] حداقل ۱ اسکرین‌شات (tablet - اختیاری)
+- [ ] Title (۳۰ char)
+- [ ] Short description (۸۰ char)
+- [ ] Full description (۴۰۰۰ char)
+- [ ] Privacy Policy URL فعال
+- [ ] Support email فعال
+
+### Compliance
+- [ ] Data Safety form پر شده
+- [ ] Content rating پرسشنامه
+- [ ] Target audience انتخاب شده
+- [ ] Ads declaration
+- [ ] App access declaration
+
+### Testing
+- [ ] Internal testing run شده
+- [ ] Closed testing ۱۴ روز (اگر لازم)
+- [ ] ۱۲ تستر minimum
+- [ ] تست روی Android 7، 10، 14
+- [ ] تست روی ABI های arm64 + x86_64
+
+### Release
+- [ ] Release notes نوشته شده
+- [ ] Rollout percentage مشخص (initial: 10-20%)
+- [ ] Staged rollout plan
+```
+
+---
+
+🎯 نتیجه
+
+زمان تقریبی انتشار:
+
+گام زمان
+ساخت حساب ۱-۲ روز
+آماده‌سازی پروژه ۱ روز
+ساخت AAB ۳۰ دقیقه
+Internal testing ۱-۲ روز
+Closed testing (۱۲ تستر × ۱۴ روز) ۱۴ روز
+Play Review ۳-۷ روز
+جمع ~۳ هفته
+
+هزینه: ۲۵ دلار (یک‌بار)
+
+---
+
+📚 منابع
+
+· Play Console
+· Play Policy Center
+· Data Safety Guide
+· Play App Signing
+· Fastlane for Android
+· F-Droid Inclusion
+
+---

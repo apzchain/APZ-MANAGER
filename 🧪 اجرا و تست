@@ -1,0 +1,21 @@
+نصب وابستگی‌ها
+
+```bash
+pip install -r requirements.txt
+```
+
+اجرا با رابط کاربری
+
+```bash
+python apz_manager.py
+```
+
+اجرا در حالت خط فرمان (قابلیت جدید)
+
+```bash
+python apz_manager.py --file sample.apk --output report.json
+```
+
+برای این حالت، باید یک تابع main_cli به فایل اصلی اضافه شود که در صورت وجود آرگومان، بدون GUI اجرا شود.
+
+---

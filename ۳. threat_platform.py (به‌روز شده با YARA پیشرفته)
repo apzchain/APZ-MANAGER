@@ -1,0 +1,120 @@
+import hashlib, json, re, zipfile, os
+from dataclasses import dataclass, asdict
+from pathlib import Path
+from risk_fusion_engine import RiskFusionEngine2
+from axml_parser import extract_permissions_and_components
+import yara  # حالا از YARA واقعی استفاده می‌کنیم
+
+@dataclass
+class YaraHit:
+    rule: str
+    severity: str
+    namespace: str
+    evidence: str
+
+class YaraScanner:
+    """
+    اسکنر YARA با پشتیبانی از قوانین داخلی و خارجی
+    """
+    def __init__(self, rules_dir: str = None):
+        self.rules_dir = rules_dir or Path(__file__).parent / "rules"
+        self.compiled_rules = None
+        self._load_rules()
+
+    def _load_rules(self):
+        rule_files = []
+        # قوانین داخلی (ساده)
+        internal_rules = """
+        rule Android_DynamicCode {
+            meta: severity = "high"
+            strings: $dex = /classes\\d*\\.dex/ $loader = "DexClassLoader" $load = "loadDex"
+            condition: $dex or $loader or $load
+        }
+        rule Android_CommandExecution {
+            meta: severity = "high"
+            strings: $sh = "/system/bin/sh" $su = "\\bsu\\b" $exec = "Runtime.getRuntime"
+            condition: $sh or $su or $exec
+        }
+        rule Android_NetworkPersistence {
+            meta: severity = "medium"
+            strings: $boot = "BOOT_COMPLETED" $receive = "RECEIVE_BOOT_COMPLETED"
+            condition: $boot or $receive
+        }
+        rule Android_Crypto {
+            meta: severity = "medium"
+            strings: $cipher = "Cipher.getInstance" $key = "SecretKeySpec"
+            condition: $cipher or $key
+        }
+        rule Android_WebViewJS {
+            meta: severity = "medium"
+            strings: $js = "addJavascriptInterface" $en = "setJavaScriptEnabled"
+            condition: $js or $en
+        }
+        rule Android_Accessibility {
+            meta: severity = "critical"
+            strings: $acc = "AccessibilityService" $node = "AccessibilityNodeInfo"
+            condition: $acc and $node
+        }
+        rule Android_SMS_Intercept {
+            meta: severity = "critical"
+            strings: $sms = "SmsManager" $send = "sendTextMessage" $recv = "SmsReceiver"
+            condition: ($sms or $send) and $recv
+        }
+        rule Android_File_Encryption {
+            meta: severity = "high"
+            strings: $enc = "FileOutputStream" $ransom = "ransom" $encrypt = "encrypt"
+            condition: ($enc and ($ransom or $encrypt))
+        }
+        rule Android_Root_Detection {
+            meta: severity = "low"
+            strings: $root = "su" $busybox = "busybox" $magisk = "magisk"
+            condition: $root or $busybox or $magisk
+        }
+        rule Android_AntiEmulator {
+            meta: severity = "low"
+            strings: $qemu = "qemu" $goldfish = "goldfish" $genymotion = "genymotion"
+            condition: $qemu or $goldfish or $genymotion
+        }
+        rule Android_Network_Spy {
+            meta: severity = "high"
+            strings: $http = "HttpURLConnection" $socket = "Socket" $post = "POST"
+            condition: $http and ($socket or $post)
+        }
+        """
+        # ذخیره قانون داخلی در فایل موقت
+        temp_rule = Path("/tmp/internal_rules.yar")
+        temp_rule.write_text(internal_rules)
+        rule_files.append(str(temp_rule))
+
+        # اضافه کردن قوانین خارجی
+        if self.rules_dir.exists():
+            for f in self.rules_dir.glob("*.yar"):
+                rule_files.append(str(f))
+
+        try:
+            self.compiled_rules = yara.compile(filepaths={f"rule_{i}": f for i, f in enumerate(rule_files)})
+        except Exception as e:
+            raise RuntimeError(f"خطا در کامپایل قوانین YARA: {e}")
+
+    def scan(self, apk_path: str) -> list[YaraHit]:
+        hits = []
+        try:
+            with zipfile.ZipFile(apk_path) as z:
+                names = z.namelist()
+                for n in names:
+                    if n.endswith((".xml", ".json", ".txt", ".smali", ".dex", ".arsc")) or "classes" in n:
+                        try:
+                            data = z.read(n)
+                            matches = self.compiled_rules.match(data=data)
+                            for match in matches:
+                                hits.append(YaraHit(
+                                    rule=match.rule,
+                                    severity=match.meta.get('severity', 'medium'),
+                                    namespace=match.namespace,
+                                    evidence=f"matched in {n}"
+                                ))
+                        except Exception:
+                            continue
+        except Exception as e:
+            hits.append(YaraHit("Scanner_Error", "info", "system", str(e)))
+        return hits

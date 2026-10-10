@@ -1,0 +1,2683 @@
+
+---
+
+📁 ساختار فایل‌های جدید
+
+```
+docs/
+├── assets/
+│   ├── css/
+│   │   └── docs-generator.css        # ✨ جدید
+│   └── js/
+│       ├── natspec-parser.js         # ✨ جدید (پارس NatSpec)
+│       ├── docs-generator.js         # ✨ جدید (تولید HTML)
+│       └── docs-viewer.js            # ✨ جدید (رندر UI + جستجو)
+└── explorer.html                     # 🔄 به‌روزرسانی می‌شود
+```
+
+---
+
+1️⃣ docs/assets/js/natspec-parser.js
+
+```javascript
+/* ═══════════════════════════════════════════════
+   APZ Wallet — NatSpec Parser
+   Parses Solidity NatSpec comments + source structure
+   Format reference: https://docs.soliditylang.org/en/latest/natspec-format.html
+   ═══════════════════════════════════════════════ */
+
+(function () {
+  'use strict';
+
+  // ─── NatSpec Tag Patterns ───
+  const TAGS = [
+    'title', 'author', 'notice', 'dev', 'param', 'return', 'returns',
+    'inheritdoc', 'custom', 'custom:event', 'custom:error', 'custom:modifier'
+  ];
+
+  // ─── Regex Patterns ───
+  const RE = {
+    // /// line comment
+    lineComment: /^\s*\/\/\/\s?(.*)$/,
+    // /** ... */ block comment
+    blockCommentStart: /^\s*\/\*\*\s*(.*)$/,
+    blockCommentEnd: /^\s*\*\/\s*$/,
+    blockCommentLine: /^\s*\*\s?(.*)$/,
+
+    // NatSpec tag
+    tag: /^\s*@(\w+(?::\w+)?)\s+(.*)$/,
+
+    // Solidity constructs
+    pragma: /^\s*pragma\s+solidity\s+([^;]+);/,
+    import: /^\s*import\s+(?:"([^"]+)"|'([^']+)'|(\{[^}]+\})\s+from\s+["']([^"']+)["'])/,
+    contract: /^\s*(abstract\s+)?(contract|interface|library)\s+(\w+)(?:\s+is\s+([^{]+))?\s*\{/,
+    function: /^\s*function\s+(\w+)\s*\(([^)]*)\)\s*(.*?)(?:\{|$)/,
+    constructor: /^\s*constructor\s*\(([^)]*)\)\s*(.*?)(?:\{|$)/,
+    fallback: /^\s*(fallback|receive)\s*\(\)\s*(.*?)(?:\{|$)/,
+    event: /^\s*event\s+(\w+)\s*\(([^)]*)\)\s*;/,
+    error: /^\s*error\s+(\w+)\s*\(([^)]*)\)\s*;/,
+    modifier: /^\s*modifier\s+(\w+)\s*(?:\(([^)]*)\))?\s*(?:virtual\s+)?(?:\{|;)/,
+    struct: /^\s*struct\s+(\w+)\s*\{/,
+    enum: /^\s*enum\s+(\w+)\s*\{/,
+    using: /^\s*using\s+(\w+)\s+for\s+(\w+|\*)\s*;/,
+    stateVar: /^\s*([\w\[\]<>,\s]+?)\s+(public|private|internal|constant|immutable|\s)+?\s*(\w+)\s*(?:=[^;]+)?\s*;/
+  };
+
+  // ─── Split source into lines ───
+  function splitLines(source) {
+    return source.replace(/\r\n/g, '\n').split('\n');
+  }
+
+  // ─── Extract a NatSpec block from lines ───
+  function extractNatSpec(lines, startIndex) {
+    const comments = [];
+    let i = startIndex;
+
+    // حالت ۱: /// lines
+    while (i >= 0 && RE.lineComment.test(lines[i])) {
+      comments.unshift(lines[i].match(RE.lineComment)[1]);
+      i--;
+    }
+
+    if (comments.length > 0) {
+      return {
+        raw: comments,
+        startLine: i + 1,
+        endLine: startIndex
+      };
+    }
+
+    // حالت ۲: /** ... */ block
+    if (RE.blockCommentEnd.test(lines[startIndex])) {
+      let j = startIndex - 1;
+      const blockLines = [];
+      while (j >= 0) {
+        if (RE.blockCommentStart.test(lines[j])) {
+          const firstLine = lines[j].match(RE.blockCommentStart)[1];
+          if (firstLine) blockLines.unshift(firstLine);
+          return {
+            raw: blockLines,
+            startLine: j,
+            endLine: startIndex
+          };
+        }
+        const lineMatch = lines[j].match(RE.blockCommentLine);
+        if (lineMatch) {
+          blockLines.unshift(lineMatch[1]);
+        } else {
+          break;
+        }
+        j--;
+      }
+    }
+
+    return null;
+  }
+
+  // ─── Parse NatSpec tags ───
+  function parseNatSpec(rawLines) {
+    const result = {
+      title: null,
+      author: null,
+      notice: null,
+      dev: null,
+      params: {},
+      returns: {},
+      returnsList: [],
+      inheritdoc: null,
+      custom: {},
+      extra: []
+    };
+
+    if (!rawLines || rawLines.length === 0) return result;
+
+    let currentTag = null;
+    let currentValue = [];
+
+    const flush = () => {
+      if (!currentTag) return;
+      const text = currentValue.join('\n').trim();
+
+      switch (currentTag) {
+        case 'title': result.title = text; break;
+        case 'author': result.author = text; break;
+        case 'notice': result.notice = text; break;
+        case 'dev': result.dev = text; break;
+        case 'inheritdoc': result.inheritdoc = text; break;
+        case 'param': {
+          const m = text.match(/^(\w+)\s+(.*)$/s);
+          if (m) result.params[m[1]] = m[2].trim();
+          break;
+        }
+        case 'return':
+        case 'returns': {
+          // @return name desc  |  @return desc
+          const m = text.match(/^(\w+)\s+(.*)$/s);
+          if (m) {
+            result.returns[m[1]] = m[2].trim();
+            result.returnsList.push({ name: m[1], desc: m[2].trim() });
+          } else {
+            result.returnsList.push({ name: '', desc: text });
+          }
+          break;
+        }
+        default: {
+          if (currentTag.startsWith('custom')) {
+            const key = currentTag.replace(/^custom:?/, '') || 'custom';
+            result.custom[key] = text;
+          } else {
+            result.extra.push({ tag: currentTag, text });
+          }
+        }
+      }
+
+      currentTag = null;
+      currentValue = [];
+    };
+
+    for (const line of rawLines) {
+      const tagMatch = line.match(RE.tag);
+      if (tagMatch) {
+        flush();
+        currentTag = tagMatch[1];
+        currentValue = [tagMatch[2]];
+      } else if (currentTag) {
+        currentValue.push(line);
+      } else {
+        // خطوط توضیحی بدون tag → به‌عنوان notice
+        if (!result.notice) result.notice = line.trim();
+      }
+    }
+    flush();
+
+    return result;
+  }
+
+  // ─── Parse function parameters ───
+  function parseParams(str) {
+    if (!str || !str.trim()) return [];
+    return str.split(',').map((p) => {
+      const parts = p.trim().split(/\s+/);
+      // uint256 _amount  |  uint256  |  address to
+      if (parts.length === 1) {
+        return { type: parts[0], name: '', indexed: false };
+      }
+      const indexed = parts.includes('indexed');
+      const filtered = parts.filter((x) => x !== 'indexed' && x !== 'memory' && x !== 'calldata' && x !== 'storage');
+      return {
+        type: filtered[0] || parts[0],
+        name: filtered[filtered.length - 1] || '',
+        indexed
+      };
+    }).filter((p) => p.type);
+  }
+
+  // ─── Parse returns ───
+  function parseReturns(str) {
+    if (!str || !str.trim()) return [];
+    // "returns (uint256, address)"
+    const m = str.match(/returns\s*\(([^)]*)\)/);
+    if (!m) return [];
+    return parseParams(m[1]);
+  }
+
+  // ─── Extract modifiers ───
+  function extractModifiers(str) {
+    if (!str) return [];
+    const matches = str.match(/\b([A-Z]\w+)\b(?!\s*\()/g);
+    return matches ? [...new Set(matches)] : [];
+  }
+
+  // ─── Main: Parse Solidity Source ───
+  function parseSource(source) {
+    const lines = splitLines(source);
+    const result = {
+      pragma: null,
+      imports: [],
+      contracts: [],
+      usingFor: []
+    };
+
+    let currentContract = null;
+    let braceDepth = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+
+      if (!trimmed || trimmed.startsWith('//')) {
+        // ادامه‌ی چک برای `@` tags قبلی
+        continue;
+      }
+
+      // ─── خارج از قرارداد ───
+      if (!currentContract) {
+        // pragma
+        const pm = trimmed.match(RE.pragma);
+        if (pm) {
+          result.pragma = pm[1];
+          continue;
+        }
+        // import
+        const im = trimmed.match(RE.import);
+        if (im) {
+          result.imports.push(im[1] || im[2] || im[4]);
+          continue;
+        }
+        // contract
+        const cm = trimmed.match(RE.contract);
+        if (cm) {
+          const natSpec = extractNatSpec(lines, i - 1);
+          const docs = parseNatSpec(natSpec?.raw || []);
+
+          currentContract = {
+            kind: cm[2],
+            name: cm[3],
+            abstract: !!cm[1],
+            inherits: cm[4] ? cm[4].split(',').map((s) => s.trim().split(/\s+/)[0]) : [],
+            docs,
+            natSpecStartLine: natSpec?.startLine ?? i,
+            definitionLine: i,
+            functions: [],
+            events: [],
+            errors: [],
+            modifiers: [],
+            structs: [],
+            enums: [],
+            stateVars: [],
+            usingFor: []
+          };
+          result.contracts.push(currentContract);
+          braceDepth = 1;
+          continue;
+        }
+      } else {
+        // ─── داخل قرارداد ───
+
+        // ردیابی عمق
+        braceDepth += (line.match(/\{/g) || []).length;
+        braceDepth -= (line.match(/\}/g) || []).length;
+
+        if (braceDepth <= 0) {
+          currentContract = null;
+          continue;
+        }
+
+        // NatSpec قبل از تعریف؟
+        const prevNatSpec = extractNatSpec(lines, i - 1);
+        const docs = prevNatSpec ? parseNatSpec(prevNatSpec.raw) : {};
+
+        // Function
+        const fm = trimmed.match(RE.function);
+        if (fm) {
+          const sig = fm[3] || '';
+          const returns = parseReturns(sig);
+          const mutability = ['view', 'pure', 'payable'].find((m) => new RegExp(`\\b${m}\\b`).test(sig)) || 'nonpayable';
+          currentContract.functions.push({
+            name: fm[1],
+            inputs: parseParams(fm[2]),
+            outputs: returns.map((r) => ({ type: r.type, name: r.name })),
+            visibility: ['public', 'private', 'internal', 'external'].find((v) => new RegExp(`\\b${v}\\b`).test(sig)) || 'public',
+            stateMutability: mutability,
+            modifiers: extractModifiers(sig),
+            virtual: /\bvirtual\b/.test(sig),
+            override: /\boverride\b/.test(sig),
+            docs,
+            line: i
+          });
+          continue;
+        }
+
+        // Constructor
+        const cst = trimmed.match(RE.constructor);
+        if (cst) {
+          currentContract.functions.push({
+            name: 'constructor',
+            kind: 'constructor',
+            inputs: parseParams(cst[1]),
+            outputs: [],
+            visibility: 'public',
+            stateMutability: 'nonpayable',
+            modifiers: extractModifiers(cst[2]),
+            docs,
+            line: i
+          });
+          continue;
+        }
+
+        // Fallback / Receive
+        const fb = trimmed.match(RE.fallback);
+        if (fb) {
+          currentContract.functions.push({
+            name: fb[1],
+            kind: 'special',
+            inputs: [],
+            outputs: [],
+            visibility: 'external',
+            stateMutability: 'payable',
+            modifiers: [],
+            docs,
+            line: i
+          });
+          continue;
+        }
+
+        // Event
+        const em = trimmed.match(RE.event);
+        if (em) {
+          currentContract.events.push({
+            name: em[1],
+            inputs: parseParams(em[2]),
+            docs,
+            line: i
+          });
+          continue;
+        }
+
+        // Error
+        const er = trimmed.match(RE.error);
+        if (er) {
+          currentContract.errors.push({
+            name: er[1],
+            inputs: parseParams(er[2]),
+            docs,
+            line: i
+          });
+          continue;
+        }
+
+        // Modifier
+        const mm = trimmed.match(RE.modifier);
+        if (mm) {
+          currentContract.modifiers.push({
+            name: mm[1],
+            inputs: parseParams(mm[2] || ''),
+            docs,
+            line: i
+          });
+          continue;
+        }
+
+        // Struct
+        const st = trimmed.match(RE.struct);
+        if (st) {
+          currentContract.structs.push({
+            name: st[1],
+            docs,
+            line: i
+          });
+          continue;
+        }
+
+        // Enum
+        const en = trimmed.match(RE.enum);
+        if (en) {
+          currentContract.enums.push({
+            name: en[1],
+            docs,
+            line: i
+          });
+          continue;
+        }
+
+        // using ... for
+        const um = trimmed.match(RE.using);
+        if (um) {
+          currentContract.usingFor.push({ library: um[1], target: um[2] });
+          continue;
+        }
+
+        // State Variable
+        const svm = trimmed.match(RE.stateVar);
+        if (svm && !trimmed.includes('(')) {
+          const visibility = ['public', 'private', 'internal'].find((v) => new RegExp(`\\b${v}\\b`).test(trimmed));
+          if (visibility) {
+            currentContract.stateVars.push({
+              type: svm[1].trim(),
+              name: svm[3],
+              visibility,
+              constant: /\bconstant\b/.test(trimmed),
+              immutable: /\bimmutable\b/.test(trimmed),
+              docs,
+              line: i
+            });
+          }
+        }
+      }
+    }
+
+    return result;
+  }
+
+  // ─── Stats ───
+  function getStats(parsed) {
+    const stats = {
+      contracts: parsed.contracts.length,
+      functions: 0,
+      events: 0,
+      errors: 0,
+      modifiers: 0,
+      stateVars: 0,
+      documented: 0,
+      totalDocs: 0,
+      coverage: 0
+    };
+
+    let total = 0;
+
+    for (const c of parsed.contracts) {
+      stats.functions += c.functions.length;
+      stats.events += c.events.length;
+      stats.errors += c.errors.length;
+      stats.modifiers += c.modifiers.length;
+      stats.stateVars += c.stateVars.length;
+
+      total += 1 + c.functions.length + c.events.length + c.errors.length + c.modifiers.length + c.stateVars.length;
+
+      // documented count
+      const checkDoc = (item) => {
+        const d = item.docs || {};
+        return !!(d.notice || d.dev || d.title || Object.keys(d.params || {}).length);
+      };
+
+      if (checkDoc(c)) stats.documented++;
+      c.functions.forEach((f) => checkDoc(f) && stats.documented++);
+      c.events.forEach((e) => checkDoc(e) && stats.documented++);
+      c.errors.forEach((e) => checkDoc(e) && stats.documented++);
+      c.modifiers.forEach((m) => checkDoc(m) && stats.documented++);
+      c.stateVars.forEach((s) => checkDoc(s) && stats.documented++);
+    }
+
+    stats.totalDocs = total;
+    stats.coverage = total > 0 ? Math.round((stats.documented / total) * 100) : 0;
+    return stats;
+  }
+
+  // ─── Public API ───
+  window.APZ_NATSPEC = {
+    parseSource,
+    parseNatSpec,
+    parseParams,
+    getStats,
+    extractNatSpec
+  };
+})();
+```
+
+---
+
+2️⃣ docs/assets/js/docs-generator.js
+
+```javascript
+/* ═══════════════════════════════════════════════
+   APZ Wallet — Documentation Generator
+   NatSpec → HTML Documentation
+   ═══════════════════════════════════════════════ */
+
+(function () {
+  'use strict';
+
+  const PARSER = window.APZ_NATSPEC;
+
+  let currentLang = localStorage.getItem('apz-dashboard-lang') || 'en';
+
+  // ─── i18n ───
+  const DOCS_I18N = {
+    en: {
+      documentation: 'Documentation',
+      coverage: 'Coverage',
+      contracts: 'Contracts',
+      functions: 'Functions',
+      events: 'Events',
+      errors: 'Errors',
+      modifiers: 'Modifiers',
+      stateVars: 'State Variables',
+      structs: 'Structs',
+      enums: 'Enums',
+      pragma: 'Pragma',
+      imports: 'Imports',
+      inherits: 'Inherits',
+      title: 'Title',
+      author: 'Author',
+      notice: 'Notice',
+      dev: 'Developer Notes',
+      params: 'Parameters',
+      returns: 'Returns',
+      inheritdoc: 'Inherited from',
+      custom: 'Custom',
+      visibility: 'Visibility',
+      mutability: 'Mutability',
+      line: 'Line',
+      undefined: 'Undefined',
+      noDocs: 'No documentation available',
+      noNatSpec: 'This contract has no NatSpec comments',
+      jumpTo: 'Jump to',
+      expandAll: 'Expand All',
+      collapseAll: 'Collapse All',
+      copySignature: 'Copy signature',
+      copiedSignature: 'Signature copied!',
+      searchDocs: 'Search docs...',
+      noResults: 'No results',
+      results: 'results',
+      documentationQuality: 'Documentation Quality',
+      excellent: 'Excellent',
+      good: 'Good',
+      fair: 'Fair',
+      poor: 'Poor',
+      constructor: 'Constructor',
+      fallback: 'Fallback',
+      receive: 'Receive',
+      readFunction: 'Read',
+      writeFunction: 'Write',
+      indexed: 'indexed'
+    },
+    fa: {
+      documentation: 'مستندات',
+      coverage: 'پوشش',
+      contracts: 'قراردادها',
+      functions: 'توابع',
+      events: 'رویدادها',
+      errors: 'خطاها',
+      modifiers: 'اصلاح‌کننده‌ها',
+      stateVars: 'متغیرهای وضعیت',
+      structs: 'ساختارها',
+      enums: 'شمارش‌ها',
+      pragma: 'پرagma',
+      imports: 'واردات',
+      inherits: 'ارث‌بری از',
+      title: 'عنوان',
+      author: 'نویسنده',
+      notice: 'اطلاعیه',
+      dev: 'یادداشت توسعه‌دهنده',
+      params: 'پارامترها',
+      returns: 'خروجی‌ها',
+      inheritdoc: 'ارث‌بری‌شده از',
+      custom: 'سفارشی',
+      visibility: 'قابل مشاهده',
+      mutability: 'تغییرپذیری',
+      line: 'خط',
+      undefined: 'تعریف‌نشده',
+      noDocs: 'مستندی در دسترس نیست',
+      noNatSpec: 'این قرارداد هیچ کامنت NatSpec ندارد',
+      jumpTo: 'پرش به',
+      expandAll: 'باز کردن همه',
+      collapseAll: 'جمع کردن همه',
+      copySignature: 'کپی امضا',
+      copiedSignature: 'امضا کپی شد!',
+      searchDocs: 'جستجو در مستندات...',
+      noResults: 'نتیجه‌ای یافت نشد',
+      results: 'نتیجه',
+      documentationQuality: 'کیفیت مستندسازی',
+      excellent: 'عالی',
+      good: 'خوب',
+      fair: 'متوسط',
+      poor: 'ضعیف',
+      constructor: 'سازنده',
+      fallback: 'Fallback',
+      receive: 'Receive',
+      readFunction: 'خواندنی',
+      writeFunction: 'نوشتنی',
+      indexed: 'ایندکس‌شده'
+    },
+    de: {
+      documentation: 'Dokumentation',
+      coverage: 'Abdeckung',
+      contracts: 'Verträge',
+      functions: 'Funktionen',
+      events: 'Ereignisse',
+      errors: 'Fehler',
+      modifiers: 'Modifikatoren',
+      stateVars: 'Zustandsvariablen',
+      structs: 'Strukturen',
+      enums: 'Aufzählungen',
+      pragma: 'Pragma',
+      imports: 'Importe',
+      inherits: 'Erbt von',
+      title: 'Titel',
+      author: 'Autor',
+      notice: 'Hinweis',
+      dev: 'Entwicklernotizen',
+      params: 'Parameter',
+      returns: 'Rückgabe',
+      inheritdoc: 'Geerbt von',
+      custom: 'Benutzerdefiniert',
+      visibility: 'Sichtbarkeit',
+      mutability: 'Veränderbarkeit',
+      line: 'Zeile',
+      undefined: 'Nicht definiert',
+      noDocs: 'Keine Dokumentation verfügbar',
+      noNatSpec: 'Dieser Vertrag hat keine NatSpec-Kommentare',
+      jumpTo: 'Springe zu',
+      expandAll: 'Alle erweitern',
+      collapseAll: 'Alle einklappen',
+      copySignature: 'Signatur kopieren',
+      copiedSignature: 'Signatur kopiert!',
+      searchDocs: 'Dokumentation durchsuchen...',
+      noResults: 'Keine Ergebnisse',
+      results: 'Ergebnisse',
+      documentationQuality: 'Dokumentationsqualität',
+      excellent: 'Ausgezeichnet',
+      good: 'Gut',
+      fair: 'Befriedigend',
+      poor: 'Schlecht',
+      constructor: 'Konstruktor',
+      fallback: 'Fallback',
+      receive: 'Empfangen',
+      readFunction: 'Lesen',
+      writeFunction: 'Schreiben',
+      indexed: 'indiziert'
+    }
+  };
+
+  function t(key) {
+    const dict = DOCS_I18N[currentLang] || DOCS_I18N.en;
+    return dict[key] || key;
+  }
+
+  // ─── Helpers ───
+  function escapeHtml(str) {
+    return String(str || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function anchorId(prefix, name) {
+    return `doc-${prefix}-${name.replace(/[^a-zA-Z0-9_]/g, '_')}`;
+  }
+
+  function formatSignature(item, kind) {
+    if (kind === 'function') {
+      const inputs = (item.inputs || []).map((i) =>
+        `${i.type}${i.indexed ? ' indexed' : ''}${i.name ? ' ' + i.name : ''}`
+      ).join(', ');
+      const outputs = (item.outputs || []).map((o) =>
+        `${o.type}${o.name ? ' ' + o.name : ''}`
+      ).join(', ');
+      const mut = item.stateMutability || 'nonpayable';
+      const mutStr = ['view', 'pure', 'payable'].includes(mut) ? ` ${mut}` : '';
+      const vis = item.visibility || 'public';
+      const mods = item.modifiers && item.modifiers.length
+        ? ' ' + item.modifiers.join(' ')
+        : '';
+      const outs = outputs ? ` returns (${outputs})` : '';
+      return `function ${item.name}(${inputs}) ${vis}${mutStr}${mods}${outs}`;
+    }
+    if (kind === 'event') {
+      const inputs = (item.inputs || []).map((i) =>
+        `${i.type}${i.indexed ? ' indexed' : ''}${i.name ? ' ' + i.name : ''}`
+      ).join(', ');
+      return `event ${item.name}(${inputs})`;
+    }
+    if (kind === 'error') {
+      const inputs = (item.inputs || []).map((i) =>
+        `${i.type}${i.name ? ' ' + i.name : ''}`
+      ).join(', ');
+      return `error ${item.name}(${inputs})`;
+    }
+    if (kind === 'modifier') {
+      const inputs = (item.inputs || []).map((i) => i.type).join(', ');
+      return `modifier ${item.name}(${inputs})`;
+    }
+    if (kind === 'stateVar') {
+      return `${item.type} ${item.visibility} ${item.name}${item.constant ? ' constant' : ''}${item.immutable ? ' immutable' : ''}`;
+    }
+    return item.name || '';
+  }
+
+  // ─── NatSpec Block Renderer ───
+  function renderNatSpecBlock(docs) {
+    if (!docs) return '';
+
+    const parts = [];
+
+    // title
+    if (docs.title) {
+      parts.push(`
+        <div class="ns-row ns-row-title">
+          <span class="ns-label">${t('title')}</span>
+          <span class="ns-value">${escapeHtml(docs.title)}</span>
+        </div>
+      `);
+    }
+
+    // author
+    if (docs.author) {
+      parts.push(`
+        <div class="ns-row">
+          <span class="ns-label">${t('author')}</span>
+          <span class="ns-value">${escapeHtml(docs.author)}</span>
+        </div>
+      `);
+    }
+
+    // inheritdoc
+    if (docs.inheritdoc) {
+      parts.push(`
+        <div class="ns-row ns-row-inherit">
+          <span class="ns-label">${t('inheritdoc')}</span>
+          <span class="ns-value ns-mono">${escapeHtml(docs.inheritdoc)}</span>
+        </div>
+      `);
+    }
+
+    // notice
+    if (docs.notice) {
+      parts.push(`
+        <div class="ns-block ns-block-notice">
+          <div class="ns-block-icon">📢</div>
+          <div class="ns-block-body">
+            <div class="ns-block-label">${t('notice')}</div>
+            <div class="ns-block-text">${escapeHtml(docs.notice).replace(/\n/g, '<br>')}</div>
+          </div>
+        </div>
+      `);
+    }
+
+    // dev
+    if (docs.dev) {
+      parts.push(`
+        <div class="ns-block ns-block-dev">
+          <div class="ns-block-icon">⚙️</div>
+          <div class="ns-block-body">
+            <div class="ns-block-label">${t('dev')}</div>
+            <div class="ns-block-text">${escapeHtml(docs.dev).replace(/\n/g, '<br>')}</div>
+          </div>
+        </div>
+      `);
+    }
+
+    // params
+    const paramNames = Object.keys(docs.params || {});
+    if (paramNames.length > 0) {
+      const rows = paramNames.map((name) => `
+        <div class="ns-param-row">
+          <code class="ns-param-name">${escapeHtml(name)}</code>
+          <span class="ns-param-desc">${escapeHtml(docs.params[name])}</span>
+        </div>
+      `).join('');
+      parts.push(`
+        <div class="ns-block">
+          <div class="ns-block-label">${t('params')}</div>
+          <div class="ns-params">${rows}</div>
+        </div>
+      `);
+    }
+
+    // returns
+    if (docs.returnsList && docs.returnsList.length > 0) {
+      const rows = docs.returnsList.map((r) => `
+        <div class="ns-param-row">
+          ${r.name ? `<code class="ns-param-name">${escapeHtml(r.name)}</code>` : ''}
+          <span class="ns-param-desc">${escapeHtml(r.desc)}</span>
+        </div>
+      `).join('');
+      parts.push(`
+        <div class="ns-block">
+          <div class="ns-block-label">${t('returns')}</div>
+          <div class="ns-params">${rows}</div>
+        </div>
+      `);
+    }
+
+    // custom tags
+    const customKeys = Object.keys(docs.custom || {});
+    if (customKeys.length > 0) {
+      const rows = customKeys.map((key) => `
+        <div class="ns-row">
+          <span class="ns-label">@${escapeHtml(key)}</span>
+          <span class="ns-value">${escapeHtml(docs.custom[key])}</span>
+        </div>
+      `).join('');
+      parts.push(`<div class="ns-custom">${rows}</div>`);
+    }
+
+    if (parts.length === 0) {
+      return `<div class="ns-empty">${t('noDocs')}</div>`;
+    }
+
+    return `<div class="ns-content">${parts.join('')}</div>`;
+  }
+
+  // ─── Code Signature Block ───
+  function renderSignature(item, kind) {
+    const sig = formatSignature(item, kind);
+    const mutability = item.stateMutability || '';
+    const visibility = item.visibility || '';
+    const badgeClass = (mutability === 'view' || mutability === 'pure') ? 'view' : 'write';
+
+    return `
+      <div class="doc-signature">
+        <code class="doc-signature-code">${escapeHtml(sig)}</code>
+        <button class="doc-copy-sig" data-sig="${escapeHtml(sig)}" title="${t('copySignature')}">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+            <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+          </svg>
+        </button>
+      </div>
+    `;
+  }
+
+  // ─── Function Card ───
+  function renderFunction(fn) {
+    const id = anchorId('fn', fn.name + (fn.kind === 'constructor' ? '_ctor' : ''));
+    const isRead = ['view', 'pure'].includes(fn.stateMutability);
+    const kindLabel = fn.kind === 'constructor' ? t('constructor')
+      : fn.kind === 'special' ? t(fn.name) // fallback/receive
+      : isRead ? t('readFunction') : t('writeFunction');
+
+    const inputChips = (fn.inputs || []).map((i) => `
+      <span class="doc-chip">
+        <code>${escapeHtml(i.type)}</code>
+        ${i.name ? `<span class="doc-chip-name">${escapeHtml(i.name)}</span>` : ''}
+      </span>
+    `).join('') || `<span class="doc-chip-empty">—</span>`;
+
+    const outputChips = (fn.outputs || []).map((o) => `
+      <span class="doc-chip doc-chip-out">
+        <code>${escapeHtml(o.type)}</code>
+        ${o.name ? `<span class="doc-chip-name">${escapeHtml(o.name)}</span>` : ''}
+      </span>
+    `).join('') || `<span class="doc-chip-empty">—</span>`;
+
+    return `
+      <details class="doc-item doc-fn" id="${id}" data-searchable="${escapeHtml(fn.name + ' ' + (fn.docs?.notice || '') + ' ' + (fn.docs?.dev || ''))}">
+        <summary class="doc-item-summary">
+          <div class="doc-item-left">
+            <span class="doc-item-kind ${isRead ? 'kind-read' : 'kind-write'}">${kindLabel}</span>
+            <span class="doc-item-name">${escapeHtml(fn.name)}</span>
+          </div>
+          <div class="doc-item-right">
+            ${fn.stateMutability && fn.stateMutability !== 'nonpayable' ? `<span class="mutability-badge ${isRead ? 'view' : 'write'}">${fn.stateMutability}</span>` : ''}
+            ${fn.visibility ? `<span class="doc-vis">${fn.visibility}</span>` : ''}
+            <svg class="doc-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </div>
+        </summary>
+
+        <div class="doc-item-body">
+          ${renderSignature(fn, 'function')}
+
+          <div class="doc-io-grid">
+            <div class="doc-io-col">
+              <div class="doc-io-label">${t('params')}</div>
+              <div class="doc-chips">${inputChips}</div>
+            </div>
+            <div class="doc-io-col">
+              <div class="doc-io-label">${t('returns')}</div>
+              <div class="doc-chips">${outputChips}</div>
+            </div>
+          </div>
+
+          ${renderNatSpecBlock(fn.docs)}
+        </div>
+      </details>
+    `;
+  }
+
+  // ─── Event Card ───
+  function renderEvent(ev) {
+    const id = anchorId('ev', ev.name);
+    return `
+      <details class="doc-item doc-ev" id="${id}" data-searchable="${escapeHtml(ev.name + ' ' + (ev.docs?.notice || ''))}">
+        <summary class="doc-item-summary">
+          <div class="doc-item-left">
+            <span class="doc-item-kind kind-event">event</span>
+            <span class="doc-item-name">${escapeHtml(ev.name)}</span>
+          </div>
+          <svg class="doc-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </summary>
+        <div class="doc-item-body">
+          ${renderSignature(ev, 'event')}
+          ${renderNatSpecBlock(ev.docs)}
+        </div>
+      </details>
+    `;
+  }
+
+  // ─── Error Card ───
+  function renderError(er) {
+    const id = anchorId('er', er.name);
+    return `
+      <details class="doc-item doc-er" id="${id}" data-searchable="${escapeHtml(er.name + ' ' + (er.docs?.notice || ''))}">
+        <summary class="doc-item-summary">
+          <div class="doc-item-left">
+            <span class="doc-item-kind kind-error">error</span>
+            <span class="doc-item-name">${escapeHtml(er.name)}</span>
+          </div>
+          <svg class="doc-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </summary>
+        <div class="doc-item-body">
+          ${renderSignature(er, 'error')}
+          ${renderNatSpecBlock(er.docs)}
+        </div>
+      </details>
+    `;
+  }
+
+  // ─── Modifier Card ───
+  function renderModifier(mod) {
+    const id = anchorId('mod', mod.name);
+    return `
+      <details class="doc-item doc-mod" id="${id}" data-searchable="${escapeHtml(mod.name + ' ' + (mod.docs?.notice || ''))}">
+        <summary class="doc-item-summary">
+          <div class="doc-item-left">
+            <span class="doc-item-kind kind-modifier">modifier</span>
+            <span class="doc-item-name">${escapeHtml(mod.name)}</span>
+          </div>
+          <svg class="doc-chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="6 9 12 15 18 9"/>
+          </svg>
+        </summary>
+        <div class="doc-item-body">
+          ${renderSignature(mod, 'modifier')}
+          ${renderNatSpecBlock(mod.docs)}
+        </div>
+      </details>
+    `;
+  }
+
+  // ─── State Var Card ───
+  function renderStateVar(sv) {
+    const id = anchorId('var', sv.name);
+    return `
+      <div class="doc-item doc-var" id="${id}" data-searchable="${escapeHtml(sv.name + ' ' + (sv.docs?.notice || ''))}">
+        <div class="doc-var-row">
+          <code class="doc-var-sig">${escapeHtml(formatSignature(sv, 'stateVar'))}</code>
+          ${sv.docs?.notice ? `<div class="doc-var-notice">${escapeHtml(sv.docs.notice)}</div>` : ''}
+        </div>
+      </div>
+    `;
+  }
+
+  // ─── Contract Card ───
+  function renderContract(contract, index) {
+    const id = anchorId('contract', contract.name);
+    const hasContent = contract.functions.length || contract.events.length ||
+      contract.errors.length || contract.modifiers.length ||
+      contract.stateVars.length;
+
+    return `
+      <details class="doc-contract" id="${id}" ${index === 0 ? 'open' : ''}>
+        <summary class="doc-contract-summary">
+          <div class="doc-contract-title">
+            <span class="doc-contract-kind">${contract.kind}${contract.abstract ? ' abstract' : ''}</span>
+            <span class="doc-contract-name">${escapeHtml(contract.name)}</span>
+            ${contract.inherits.length ? `
+              <span class="doc-contract-inherits">
+                ${t('inherits')} ${contract.inherits.map((i) => `<code>${escapeHtml(i)}</code>`).join(', ')}
+              </span>
+            ` : ''}
+          </div>
+          <div class="doc-contract-stats">
+            ${contract.functions.length ? `<span class="doc-stat-chip">${contract.functions.length} ${t('functions')}</span>` : ''}
+            ${contract.events.length ? `<span class="doc-stat-chip">${contract.events.length} ${t('events')}</span>` : ''}
+            ${contract.modifiers.length ? `<span class="doc-stat-chip">${contract.modifiers.length} ${t('modifiers')}</span>` : ''}
+            <svg class="doc-chevron" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="6 9 12 15 18 9"/>
+            </svg>
+          </div>
+        </summary>
+
+        <div class="doc-contract-body">
+          ${renderNatSpecBlock(contract.docs)}
+
+          ${contract.stateVars.length ? `
+            <div class="doc-section">
+              <h4 class="doc-section-title">${t('stateVars')}</h4>
+              <div class="doc-var-list">
+                ${contract.stateVars.map(renderStateVar).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          ${contract.modifiers.length ? `
+            <div class="doc-section">
+              <h4 class="doc-section-title">${t('modifiers')}</h4>
+              <div class="doc-list">
+                ${contract.modifiers.map(renderModifier).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          ${contract.functions.length ? `
+            <div class="doc-section">
+              <h4 class="doc-section-title">${t('functions')}</h4>
+              <div class="doc-list">
+                ${contract.functions.map(renderFunction).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          ${contract.events.length ? `
+            <div class="doc-section">
+              <h4 class="doc-section-title">${t('events')}</h4>
+              <div class="doc-list">
+                ${contract.events.map(renderEvent).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          ${contract.errors.length ? `
+            <div class="doc-section">
+              <h4 class="doc-section-title">${t('errors')}</h4>
+              <div class="doc-list">
+                ${contract.errors.map(renderError).join('')}
+              </div>
+            </div>
+          ` : ''}
+
+          ${!hasContent ? `
+            <div class="doc-empty-note">${t('noNatSpec')}</div>
+          ` : ''}
+        </div>
+      </details>
+    `;
+  }
+
+  // ─── Coverage Bar ───
+  function getCoverageClass(pct) {
+    if (pct >= 80) return 'excellent';
+    if (pct >= 60) return 'good';
+    if (pct >= 40) return 'fair';
+    return 'poor';
+  }
+
+  function getCoverageLabel(pct) {
+    if (pct >= 80) return t('excellent');
+    if (pct >= 60) return t('good');
+    if (pct >= 40) return t('fair');
+    return t('poor');
+  }
+
+  function renderCoverage(stats) {
+    const cls = getCoverageClass(stats.coverage);
+    return `
+      <div class="doc-stats-grid">
+        <div class="doc-stat-card">
+          <div class="doc-stat-num">${stats.contracts}</div>
+          <div class="doc-stat-lbl">${t('contracts')}</div>
+        </div>
+        <div class="doc-stat-card">
+          <div class="doc-stat-num">${stats.functions}</div>
+          <div class="doc-stat-lbl">${t('functions')}</div>
+        </div>
+        <div class="doc-stat-card">
+          <div class="doc-stat-num">${stats.events}</div>
+          <div class="doc-stat-lbl">${t('events')}</div>
+        </div>
+        <div class="doc-stat-card doc-stat-coverage ${cls}">
+          <div class="doc-stat-num">${stats.coverage}%</div>
+          <div class="doc-stat-lbl">${t('coverage')} · ${getCoverageLabel(stats.coverage)}</div>
+          <div class="doc-coverage-bar">
+            <div class="doc-coverage-fill" style="width:${stats.coverage}%"></div>
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  // ─── Header (Pragma, Imports) ───
+  function renderHeader(parsed, address, chainId) {
+    const parts = [];
+
+    if (parsed.pragma) {
+      parts.push(`
+        <div class="doc-header-row">
+          <span class="doc-header-label">${t('pragma')}</span>
+          <code class="doc-header-value">solidity ${escapeHtml(parsed.pragma)}</code>
+        </div>
+      `);
+    }
+
+    if (parsed.imports.length > 0) {
+      parts.push(`
+        <div class="doc-header-row">
+          <span class="doc-header-label">${t('imports')}</span>
+          <div class="doc-header-imports">
+            ${parsed.imports.map((i) => `<code class="doc-import">${escapeHtml(i)}</code>`).join('')}
+          </div>
+        </div>
+      `);
+    }
+
+    if (parts.length === 0) return '';
+
+    return `<div class="doc-header">${parts.join('')}</div>`;
+  }
+
+  // ─── Toolbar ───
+  function renderToolbar() {
+    return `
+      <div class="doc-toolbar">
+        <div class="doc-toolbar-left">
+          <div class="doc-search-wrap">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="11" cy="11" r="8"/>
+              <line x1="21" y1="21" x2="16.65" y2="16.65"/>
+            </svg>
+            <input type="text" class="doc-search" id="doc-search" placeholder="${t('searchDocs')}" />
+            <span class="doc-search-count" id="doc-search-count"></span>
+          </div>
+        </div>
+        <div class="doc-toolbar-right">
+          <button class="doc-btn" id="doc-expand-all">↧ ${t('expandAll')}</button>
+          <button class="doc-btn" id="doc-collapse-all">↥ ${t('collapseAll')}</button>
+        </div>
+      </div>
+    `;
+  }
+
+  // ─── Main Render ───
+  function render(source, address, chainId) {
+    if (!source || !source.trim()) {
+      return renderNoSource();
+    }
+
+    let parsed;
+    try {
+      parsed = PARSER.parseSource(source);
+    } catch (err) {
+      console.error('[Docs] Parse error:', err);
+      return `<div class="doc-error">Failed to parse source: ${escapeHtml(err.message)}</div>`;
+    }
+
+    const stats = PARSER.getStats(parsed);
+
+    if (parsed.contracts.length === 0) {
+      return renderNoSource();
+    }
+
+    return `
+      <div class="docs-wrapper" data-source-size="${source.length}">
+        ${renderCoverage(stats)}
+        ${renderToolbar()}
+        ${renderHeader(parsed, address, chainId)}
+        <div class="doc-contracts">
+          ${parsed.contracts.map((c, i) => renderContract(c, i)).join('')}
+        </div>
+      </div>
+    `;
+  }
+
+  // ─── No Source ───
+  function renderNoSource() {
+    return `
+      <div class="docs-wrapper docs-empty">
+        <div class="doc-empty-icon">📚</div>
+        <h3>${t('noDocs')}</h3>
+        <p>${t('noNatSpec')}</p>
+      </div>
+    `;
+  }
+
+  // ─── Public ───
+  window.APZ_DOCS_GEN = {
+    render,
+    setLang: (lang) => { currentLang = lang; },
+    getLang: () => currentLang
+  };
+})();
+```
+
+---
+
+3️⃣ docs/assets/js/docs-viewer.js
+
+```javascript
+/* ═══════════════════════════════════════════════
+   APZ Wallet — Docs Viewer
+   Binds interactions: search, expand/collapse, copy, TOC
+   ═══════════════════════════════════════════════ */
+
+(function () {
+  'use strict';
+
+  let activeSearch = '';
+  let searchHits = [];
+  let currentHitIndex = 0;
+
+  // ─── Helpers ───
+  function showToast(message, type = 'success') {
+    window.dispatchEvent(new CustomEvent('apz-toast', {
+      detail: { message, type }
+    }));
+  }
+
+  function copyToClipboard(text) {
+    return navigator.clipboard.writeText(text);
+  }
+
+  // ─── Expand / Collapse ───
+  function expandAll(container, expand = true) {
+    container.querySelectorAll('details').forEach((d) => {
+      d.open = expand;
+    });
+  }
+
+  // ─── Search ───
+  function performSearch(query, container) {
+    activeSearch = query.trim().toLowerCase();
+    const countEl = container.querySelector('#doc-search-count');
+
+    // پاک کردن highlightهای قبلی
+    container.querySelectorAll('.doc-search-hit').forEach((el) => {
+      const parent = el.parentNode;
+      parent.replaceChild(document.createTextNode(el.textContent), el);
+      parent.normalize();
+    });
+    container.querySelectorAll('[data-search-hidden]').forEach((el) => {
+      delete el.dataset.searchHidden;
+      el.style.display = '';
+    });
+
+    if (!activeSearch || activeSearch.length < 2) {
+      countEl.textContent = '';
+      searchHits = [];
+      currentHitIndex = 0;
+      return;
+    }
+
+    // پیدا کردن همه‌ی items با data-searchable
+    const items = container.querySelectorAll('[data-searchable]');
+    let hits = 0;
+
+    items.forEach((item) => {
+      const text = (item.dataset.searchable || '').toLowerCase();
+      if (text.includes(activeSearch)) {
+        hits++;
+        // باز کردن parent details
+        const parentDetails = item.closest('details');
+        if (parentDetails) parentDetails.open = true;
+      }
+    });
+
+    // جستجو در متن کامل برای highlight
+    if (hits === 0) {
+      countEl.textContent = '0';
+      countEl.classList.add('no-match');
+      return;
+    }
+
+    countEl.classList.remove('no-match');
+    countEl.textContent = `${hits}`;
+  }
+
+  // ─── Keyboard Navigation ───
+  function setupKeyboard(container) {
+    document.addEventListener('keydown', (e) => {
+      const search = container.querySelector('#doc-search');
+
+      // Ctrl/Cmd + F → focus search
+      if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
+        if (container.contains(document.activeElement) || search === document.activeElement) {
+          e.preventDefault();
+          search?.focus();
+        }
+      }
+
+      // Escape → clear search
+      if (e.key === 'Escape' && document.activeElement === search) {
+        search.value = '';
+        performSearch('', container);
+        search.blur();
+      }
+    });
+  }
+
+  // ─── Bind ───
+  function bind(container) {
+    // Copy signature buttons
+    container.querySelectorAll('.doc-copy-sig').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const sig = btn.dataset.sig;
+        try {
+          await copyToClipboard(sig);
+          showToast('Signature copied!', 'success');
+          btn.classList.add('copied');
+          setTimeout(() => btn.classList.remove('copied'), 1200);
+        } catch {
+          showToast('Copy failed', 'error');
+        }
+      });
+    });
+
+    // Expand all
+    container.querySelector('#doc-expand-all')?.addEventListener('click', () => {
+      expandAll(container, true);
+    });
+
+    // Collapse all
+    container.querySelector('#doc-collapse-all')?.addEventListener('click', () => {
+      expandAll(container, false);
+    });
+
+    // Search
+    const searchInput = container.querySelector('#doc-search');
+    if (searchInput) {
+      let debounce;
+      searchInput.addEventListener('input', () => {
+        clearTimeout(debounce);
+        debounce = setTimeout(() => {
+          performSearch(searchInput.value, container);
+        }, 200);
+      });
+
+      searchInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          // پرش به اولین نتیجه
+          const first = container.querySelector('[data-searchable]:not([data-search-hidden])');
+          if (first) {
+            first.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            first.classList.add('doc-flash');
+            setTimeout(() => first.classList.remove('doc-flash'), 1500);
+          }
+        }
+      });
+    }
+
+    // Anchor links (برای jump از URL hash)
+    container.querySelectorAll('[id^="doc-"]').forEach((el) => {
+      el.addEventListener('click', (e) => {
+        if (e.target.tagName === 'SUMMARY' || e.target.closest('summary')) {
+          // اجازه بده که details باز/بسته شود
+          return;
+        }
+        // اگر روی anchor کلیک شد، URL hash را آپدیت کن
+        if (e.target.classList.contains('doc-item-name')) {
+          history.replaceState(null, '', `#${el.id}`);
+          copyToClipboard(`${location.origin}${location.pathname}${location.search}#${el.id}`);
+          showToast('Link copied!', 'success');
+        }
+      });
+    });
+
+    setupKeyboard(container);
+  }
+
+  // ─── Public API ───
+  window.APZ_DOCS_VIEWER = {
+    bind,
+    expandAll,
+    performSearch
+  };
+})();
+```
+
+---
+
+4️⃣ docs/assets/css/docs-generator.css
+
+```css
+/* ═══════════════════════════════════════════════
+   APZ Wallet — Documentation Generator Styles
+   ═══════════════════════════════════════════════ */
+
+/* ─── Wrapper ─── */
+.docs-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.docs-empty {
+  padding: 60px 20px;
+  text-align: center;
+  color: var(--text-dim);
+}
+
+.docs-empty .doc-empty-icon {
+  font-size: 3rem;
+  margin-bottom: 12px;
+  opacity: 0.5;
+}
+
+.docs-empty h3 {
+  font-size: 1.15rem;
+  color: var(--text);
+  margin-bottom: 6px;
+}
+
+.docs-empty p {
+  font-size: 0.88rem;
+  max-width: 420px;
+  margin: 0 auto;
+}
+
+/* ─── Stats Grid ─── */
+.doc-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.doc-stat-card {
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  text-align: center;
+  transition: var(--transition);
+  position: relative;
+  overflow: hidden;
+}
+
+.doc-stat-card:hover { border-color: var(--border-hover); }
+
+.doc-stat-num {
+  font-family: var(--font-mono);
+  font-size: 1.6rem;
+  font-weight: 800;
+  color: var(--neon);
+  letter-spacing: -0.02em;
+  line-height: 1.1;
+}
+
+.doc-stat-lbl {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dimmer);
+  font-weight: 700;
+  margin-top: 4px;
+}
+
+.doc-stat-coverage.excellent .doc-stat-num { color: #00ff88; }
+.doc-stat-coverage.good .doc-stat-num { color: #00ffcc; }
+.doc-stat-coverage.fair .doc-stat-num { color: #ffc107; }
+.doc-stat-coverage.poor .doc-stat-num { color: #ff3860; }
+
+.doc-coverage-bar {
+  margin-top: 8px;
+  height: 4px;
+  background: var(--bg-3);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.doc-coverage-fill {
+  height: 100%;
+  background: linear-gradient(90deg, currentColor, var(--neon-2));
+  border-radius: 999px;
+  transition: width 600ms cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.doc-stat-coverage.excellent .doc-coverage-fill { background: linear-gradient(90deg, #00ff88, #00ffcc); }
+.doc-stat-coverage.good .doc-coverage-fill { background: linear-gradient(90deg, #00ffcc, #00b8ff); }
+.doc-stat-coverage.fair .doc-coverage-fill { background: linear-gradient(90deg, #ffc107, #ff9800); }
+.doc-stat-coverage.poor .doc-coverage-fill { background: linear-gradient(90deg, #ff3860, #ff6b6b); }
+
+/* ─── Toolbar ─── */
+.doc-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  flex-wrap: wrap;
+}
+
+.doc-toolbar-left,
+.doc-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.doc-search-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 12px;
+  color: var(--text-dim);
+  transition: var(--transition);
+  min-width: 220px;
+}
+
+.doc-search-wrap:focus-within {
+  border-color: var(--neon);
+  box-shadow: 0 0 0 2px rgba(0, 255, 204, 0.1);
+}
+
+.doc-search {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: var(--text);
+  font-family: inherit;
+  font-size: 0.82rem;
+  flex: 1;
+  min-width: 0;
+}
+
+.doc-search::placeholder { color: var(--text-dimmer); }
+
+.doc-search-count {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  color: var(--neon);
+  padding: 2px 6px;
+  background: rgba(0, 255, 204, 0.1);
+  border-radius: 4px;
+}
+
+.doc-search-count.no-match {
+  color: var(--danger);
+  background: rgba(255, 56, 96, 0.1);
+}
+
+.doc-btn {
+  padding: 6px 12px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 0.75rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.doc-btn:hover {
+  color: var(--neon);
+  border-color: var(--border-hover);
+}
+
+/* ─── Header (Pragma/Imports) ─── */
+.doc-header {
+  padding: 14px 18px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.doc-header-row {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.doc-header-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dimmer);
+  font-weight: 700;
+  min-width: 80px;
+}
+
+.doc-header-value,
+.doc-import {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--neon);
+  padding: 3px 10px;
+  background: rgba(0, 255, 204, 0.05);
+  border: 1px solid rgba(0, 255, 204, 0.15);
+  border-radius: 6px;
+}
+
+.doc-header-imports {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ─── Contract Details ─── */
+.doc-contracts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.doc-contract {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  overflow: hidden;
+  transition: var(--transition);
+}
+
+.doc-contract[open] {
+  border-color: rgba(0, 255, 204, 0.25);
+  box-shadow: 0 0 24px rgba(0, 255, 204, 0.06);
+}
+
+.doc-contract-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.doc-contract-summary::-webkit-details-marker { display: none; }
+
+.doc-contract-title {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.doc-contract-kind {
+  padding: 3px 10px;
+  background: rgba(168, 85, 247, 0.15);
+  color: #c8a3f7;
+  border-radius: 6px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.doc-contract-name {
+  font-family: var(--font-mono);
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: var(--neon);
+  letter-spacing: -0.01em;
+}
+
+.doc-contract-inherits {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+}
+
+.doc-contract-inherits code {
+  font-family: var(--font-mono);
+  color: #ffcb6b;
+  padding: 1px 6px;
+  background: rgba(255, 203, 107, 0.08);
+  border-radius: 4px;
+  font-size: 0.7rem;
+}
+
+.doc-contract-stats {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.doc-stat-chip {
+  padding: 3px 10px;
+  background: var(--bg-3);
+  border-radius: 6px;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+}
+
+.doc-chevron {
+  color: var(--text-dimmer);
+  transition: transform 200ms;
+  flex-shrink: 0;
+}
+
+.doc-contract[open] > .doc-contract-summary .doc-chevron,
+.doc-item[open] > .doc-item-summary .doc-chevron {
+  transform: rotate(180deg);
+}
+
+.doc-contract-body {
+  padding: 0 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ─── Sections ─── */
+.doc-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.doc-section-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--text-dimmer);
+  font-weight: 700;
+  padding-bottom: 6px;
+  border-bottom: 1px dashed var(--border);
+}
+
+.doc-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ─── NatSpec Block ─── */
+.ns-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.ns-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 8px 12px;
+  background: var(--bg-2);
+  border-radius: 8px;
+  font-size: 0.82rem;
+  border: 1px solid transparent;
+}
+
+.ns-row-title {
+  background: linear-gradient(135deg, rgba(0, 255, 204, 0.08), rgba(0, 184, 255, 0.05));
+  border-color: rgba(0, 255, 204, 0.15);
+}
+
+.ns-row-inherit {
+  background: rgba(255, 203, 107, 0.05);
+  border-color: rgba(255, 203, 107, 0.15);
+}
+
+.ns-label {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-dimmer);
+  min-width: 80px;
+  flex-shrink: 0;
+}
+
+.ns-value {
+  color: var(--text);
+  word-break: break-word;
+  flex: 1;
+}
+
+.ns-value.ns-mono { font-family: var(--font-mono); font-size: 0.78rem; }
+
+.ns-block {
+  padding: 12px 14px;
+  background: var(--bg-2);
+  border-radius: 10px;
+  border-left: 3px solid var(--neon);
+}
+
+.ns-block-notice {
+  background: rgba(0, 255, 204, 0.05);
+  border-left-color: var(--neon);
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.ns-block-dev {
+  background: rgba(168, 85, 247, 0.05);
+  border-left-color: #a855f7;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.ns-block-icon {
+  font-size: 1.1rem;
+  flex-shrink: 0;
+  line-height: 1;
+  margin-top: 2px;
+}
+
+.ns-block-body { flex: 1; min-width: 0; }
+
+.ns-block-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dimmer);
+  font-weight: 700;
+  margin-bottom: 6px;
+}
+
+.ns-block-text {
+  font-size: 0.85rem;
+  color: var(--text);
+  line-height: 1.6;
+}
+
+.ns-params {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ns-param-row {
+  display: flex;
+  gap: 10px;
+  align-items: baseline;
+  padding: 4px 0;
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.ns-param-name {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--neon);
+  padding: 2px 8px;
+  background: rgba(0, 255, 204, 0.08);
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.ns-param-desc {
+  color: var(--text);
+  flex: 1;
+  word-break: break-word;
+}
+
+.ns-custom {
+  padding: 10px 14px;
+  background: rgba(136, 146, 176, 0.05);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.ns-empty {
+  padding: 10px 14px;
+  font-size: 0.82rem;
+  color: var(--text-dimmer);
+  font-style: italic;
+  background: var(--bg-2);
+  border-radius: 8px;
+  text-align: center;
+}
+
+/* ─── Item (Function/Event/Error/Modifier) ─── */
+.doc-item {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  transition: var(--transition);
+}
+
+.doc-item:hover { border-color: var(--border-hover); }
+
+.doc-item[open] { border-color: rgba(0, 255, 204, 0.2); }
+
+.doc-item-summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  gap: 12px;
+}
+
+.doc-item-summary::-webkit-details-marker { display: none; }
+
+.doc-item-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  flex: 1;
+}
+
+.doc-item-kind {
+  font-size: 0.62rem;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  flex-shrink: 0;
+}
+
+.kind-read { background: rgba(0, 255, 204, 0.1); color: var(--neon); }
+.kind-write { background: rgba(255, 193, 7, 0.1); color: var(--warn); }
+.kind-event { background: rgba(168, 85, 247, 0.1); color: #a855f7; }
+.kind-error { background: rgba(255, 56, 96, 0.1); color: var(--danger); }
+.kind-modifier { background: rgba(0, 184, 255, 0.1); color: #00b8ff; }
+
+.doc-item-name {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  font-weight: 700;
+  color: var(--text);
+  cursor: copy;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.doc-item-name:hover { color: var(--neon); text-decoration: underline dashed; text-underline-offset: 3px; }
+
+.doc-item-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.doc-vis {
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+  color: var(--text-dimmer);
+}
+
+.doc-item-body {
+  padding: 0 16px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  animation: docSlide 200ms;
+}
+
+@keyframes docSlide {
+  from { opacity: 0; transform: translateY(-4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── Signature ─── */
+.doc-signature {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.doc-signature-code {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: var(--neon);
+  flex: 1;
+  word-break: break-all;
+  line-height: 1.5;
+}
+
+.doc-copy-sig {
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 6px;
+  border-radius: 6px;
+  transition: var(--transition);
+  flex-shrink: 0;
+}
+
+.doc-copy-sig:hover {
+  color: var(--neon);
+  background: rgba(0, 255, 204, 0.1);
+}
+
+.doc-copy-sig.copied { color: var(--success); }
+
+/* ─── I/O Grid ─── */
+.doc-io-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.doc-io-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.doc-io-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dimmer);
+  font-weight: 700;
+}
+
+.doc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.doc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  background: rgba(0, 184, 255, 0.08);
+  border: 1px solid rgba(0, 184, 255, 0.2);
+  border-radius: 6px;
+  font-size: 0.72rem;
+}
+
+.doc-chip-out {
+  background: rgba(0, 255, 204, 0.06);
+  border-color: rgba(0, 255, 204, 0.2);
+}
+
+.doc-chip code {
+  font-family: var(--font-mono);
+  color: #00b8ff;
+  font-size: 0.72rem;
+}
+
+.doc-chip-out code { color: var(--neon); }
+
+.doc-chip-name {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 0.68rem;
+}
+
+.doc-chip-empty {
+  font-size: 0.78rem;
+  color: var(--text-dimmer);
+  font-style: italic;
+}
+
+/* ─── State Var ─── */
+.doc-var-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.doc-var {
+  padding: 10px 14px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  transition: var(--transition);
+}
+
+.doc-var:hover { border-color: var(--border-hover); }
+
+.doc-var-sig {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  color: #ffcb6b;
+  word-break: break-all;
+}
+
+.doc-var-notice {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+/* ─── Flash Effect for Search Jump ─── */
+.doc-flash {
+  animation: docFlash 1.5s ease-out;
+}
+
+@keyframes docFlash {
+  0%, 100% { background: transparent; }
+  30% { background: rgba(0, 255, 204, 0.15); }
+}
+
+/* ─── Error ─── */
+.doc-error {
+  padding: 20px;
+  background: rgba(255, 56, 96, 0.06);
+  border: 1px solid rgba(255, 56, 96, 0.2);
+  border-radius: 12px;
+  color: var(--danger);
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+/* ─── Responsive ─── */
+@media (max-width: 640px) {
+  .doc-stats-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .doc-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .doc-toolbar-left,
+  .doc-toolbar-right {
+    width: 100%;
+  }
+
+  .doc-search-wrap { min-width: auto; flex: 1; }
+
+  .doc-btn { flex: 1; justify-content: center; }
+
+  .doc-io-grid { grid-template-columns: 1fr; }
+
+  .doc-contract-body { padding: 0 14px 16px; }
+  .doc-item-body { padding: 0 14px 14px; }
+
+  .ns-param-row { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .ns-param-name { align-self: flex-start; }
+
+  .doc-contract-summary { padding: 14px; }
+  .doc-item-summary { padding: 10px 14px; }
+}
+
+/* ─── RTL ─── */
+[dir="rtl"] .doc-item-name { text-align: right; }
+[dir="rtl"] .ns-block { border-left: none; border-right: 3px solid var(--neon); }
+[dir="rtl"] .ns-block-dev { border-right-color: #a855f7; }
+[dir="rtl"] .doc-signature-code { direction: ltr; text-align: left; }
+[dir="rtl"] .doc-var-sig { direction: ltr; text-align: left; }
+```
+
+---
+
+5️⃣ 🔄 به‌روزرسانی explorer.html
+
+در <head>:
+
+```html
+<link rel="stylesheet" href="assets/css/docs-generator.css" />
+```
+
+قبل از explorer.js:
+
+```html
+<script src="assets/js/natspec-parser.js"></script>
+<script src="assets/js/docs-generator.js"></script>
+<script src="assets/js/docs-viewer.js"></script>
+```
+
+افزودن دکمه‌ی تب به Explorer UI
+
+در explorer.html، جایی که result-section هست، قبل از result-content:
+
+```html
+<div class="result-tabs" id="result-tabs" hidden>
+  <button class="result-tab active" data-tab="overview" data-i18n="tabs.overview">Overview</button>
+  <button class="result-tab" data-tab="source" data-i18n="tabs.source">Source</button>
+  <button class="result-tab" data-tab="docs" data-i18n="tabs.docs">Documentation</button>
+  <button class="result-tab" data-tab="abi" data-i18n="tabs.abi">ABI</button>
+</div>
+```
+
+و در style.css (یا یک فایل CSS جدید):
+
+```css
+/* ─── Result Tabs ─── */
+.result-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 6px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-bottom: 16px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.result-tabs::-webkit-scrollbar { display: none; }
+
+.result-tab {
+  flex: 1;
+  min-width: max-content;
+  padding: 10px 18px;
+  background: transparent;
+  border: none;
+  border-radius: 8px;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 0.82rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: var(--transition);
+  white-space: nowrap;
+}
+
+.result-tab:hover { color: var(--text); background: rgba(0, 255, 204, 0.05); }
+
+.result-tab.active {
+  background: linear-gradient(135deg, rgba(0, 255, 204, 0.15), rgba(0, 184, 255, 0.1));
+  color: var(--neon);
+  box-shadow: 0 0 12px rgba(0, 255, 204, 0.15);
+}
+```
+
+---
+
+6️⃣ 🔄 ادغام در explorer.js
+
+```javascript
+// ─── در بالای فایل ───
+const DOCS_GEN = window.APZ_DOCS_GEN;
+const DOCS_VIEWER = window.APZ_DOCS_VIEWER;
+const NATSPEC = window.APZ_NATSPEC;
+
+let currentContractData = {
+  address: null,
+  chainId: null,
+  abiInfo: null,
+  sourceInfo: null,
+  bytecode: null
+};
+
+// ─── در performSearch، بخش contract ───
+if (info.isContract) {
+  const chainId = RPC.hexToNumber(await RPC.getChainId());
+
+  // موازی: ABI + Source + Bytecode
+  const [abiInfo, sourceInfo, bytecode] = await Promise.all([
+    ABI.fetchABI(chainId, query),
+    SOURCE.fetchSource(chainId, query),
+    RPC.getCode(query)
+  ]);
+
+  const finalAbiInfo = (sourceInfo.abi && (!abiInfo.abi || !abiInfo.verified))
+    ? { ...abiInfo, abi: sourceInfo.abi, verified: true, source: sourceInfo.source }
+    : abiInfo;
+
+  if (finalAbiInfo.abi) {
+    await CONTRACT.attachSelectors(finalAbiInfo.abi);
+  }
+  window.__currentABI = (finalAbiInfo.abi || []).filter((x) => x.type === 'function');
+
+  // ─── ذخیره داده‌ها برای تب‌ها ───
+  currentContractData = {
+    address: query,
+    chainId,
+    abiInfo: finalAbiInfo,
+    sourceInfo,
+    bytecode
+  };
+
+  // ─── ساخت محتوای همه‌ی تب‌ها ───
+  const overviewHtml = CONTRACT_UI.renderContract(query, finalAbiInfo, bytecode, showToast);
+  const sourceHtml = (sourceInfo.files && sourceInfo.files.length > 0)
+    ? SRC_VIEWER.renderSource(sourceInfo, query, chainId)
+    : SRC_VIEWER.renderNoSource(query, chainId);
+
+  // ─── Docs ───
+  let docsHtml;
+  const mainFile = sourceInfo.files?.find((f) => f.isMain) || sourceInfo.files?.[0];
+  if (mainFile?.content) {
+    docsHtml = DOCS_GEN.render(mainFile.content, query, chainId);
+  } else {
+    docsHtml = DOCS_GEN.renderNoSource();
+  }
+
+  // ─── ABI JSON ───
+  const abiJson = finalAbiInfo.abi
+    ? JSON.stringify(finalAbiInfo.abi, null, 2)
+    : '// ABI not available';
+  const abiHtml = `
+    <div class="result-card">
+      <div class="card-section-title">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <polyline points="16 18 22 12 16 6"/>
+          <polyline points="8 6 2 12 8 18"/>
+        </svg>
+        ABI
+        <button class="btn btn-ghost small" id="copy-abi-btn" style="margin-inline-start:auto">📋 Copy ABI</button>
+      </div>
+      <pre class="abi-json"><code>${escapeHtml(abiJson)}</code></pre>
+    </div>
+  `;
+
+  // ─── Tabs ───
+  html = `
+    <div class="result-tabs" id="result-tabs" style="display:flex">
+      <button class="result-tab active" data-tab="overview">${t('tabs.overview') || 'Overview'}</button>
+      <button class="result-tab" data-tab="source">${t('tabs.source') || 'Source'}</button>
+      <button class="result-tab" data-tab="docs">${t('tabs.docs') || 'Documentation'}</button>
+      <button class="result-tab" data-tab="abi">${t('tabs.abi') || 'ABI'}</button>
+    </div>
+    <div class="tab-panel active" data-panel="overview">${overviewHtml}</div>
+    <div class="tab-panel" data-panel="source" hidden>${sourceHtml}</div>
+    <div class="tab-panel" data-panel="docs" hidden>${docsHtml}</div>
+    <div class="tab-panel" data-panel="abi" hidden>${abiHtml}</div>
+  `;
+}
+
+// ─── بعد از content.innerHTML = html ───
+if (type === 'address' && currentContractData.address) {
+  bindContractInteractions(content, query);
+  bindSourceInteractions(content, query, currentContractData.chainId);
+  bindDocsInteractions(content);
+  bindTabs(content);
+  bindCopyABI(content);
+}
+
+// ═══════════════════════════════════════════
+// Tab Binder
+// ═══════════════════════════════════════════
+function bindTabs(container) {
+  const tabs = container.querySelectorAll('.result-tab');
+  const panels = container.querySelectorAll('.tab-panel');
+
+  tabs.forEach((tab) => {
+    tab.addEventListener('click', () => {
+      const target = tab.dataset.tab;
+
+      tabs.forEach((t) => t.classList.toggle('active', t === tab));
+      panels.forEach((p) => {
+        const show = p.dataset.panel === target;
+        p.hidden = !show;
+        p.classList.toggle('active', show);
+      });
+
+      // ذخیره در URL
+      const params = new URLSearchParams(location.search);
+      params.set('tab', target);
+      history.replaceState(null, '', `?${params.toString()}`);
+    });
+  });
+
+  // فعال‌سازی از URL
+  const params = new URLSearchParams(location.search);
+  const tab = params.get('tab');
+  if (tab) {
+    const targetTab = container.querySelector(`.result-tab[data-tab="${tab}"]`);
+    targetTab?.click();
+  }
+}
+
+// ═══════════════════════════════════════════
+// Docs Binder
+// ═══════════════════════════════════════════
+function bindDocsInteractions(container) {
+  const docsPanel = container.querySelector('[data-panel="docs"] .docs-wrapper');
+  if (!docsPanel) return;
+  DOCS_VIEWER.bind(docsPanel);
+}
+
+// ═══════════════════════════════════════════
+// Copy ABI
+// ═══════════════════════════════════════════
+function bindCopyABI(container) {
+  document.getElementById('copy-abi-btn')?.addEventListener('click', () => {
+    const abiText = container.querySelector('.abi-json code')?.textContent || '';
+    navigator.clipboard.writeText(abiText).then(() => {
+      showToast('ABI copied!', 'success');
+    });
+  });
+}
+
+// ─── در applyLang ───
+DOCS_GEN.setLang(lang);
+DOCS_VIEWER.setLang?.(lang);
+```
+
+افزودن i18n تب‌ها:
+
+در EXPLORER_I18N:
+
+```javascript
+// en:
+tabs: { overview: 'Overview', source: 'Source', docs: 'Documentation', abi: 'ABI' }
+
+// fa:
+tabs: { overview: 'نمای کلی', source: 'سورس', docs: 'مستندات', abi: 'ABI' }
+
+// de:
+tabs: { overview: 'Übersicht', source: 'Quellcode', docs: 'Dokumentation', abi: 'ABI' }
+```
+
+CSS برای .abi-json و .tab-panel:
+
+```css
+/* ─── Tab Panels ─── */
+.tab-panel { animation: tabFade 200ms; }
+.tab-panel[hidden] { display: none; }
+
+@keyframes tabFade {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* ─── ABI JSON ─── */
+.abi-json {
+  padding: 16px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  line-height: 1.6;
+  max-height: 500px;
+  overflow-y: auto;
+  white-space: pre;
+  overflow-x: auto;
+}
+```
+
+---
+
+7️⃣ 🔄 به‌روزرسانی sw.js
+
+```javascript
+'./assets/css/docs-generator.css',
+'./assets/js/natspec-parser.js',
+'./assets/js/docs-generator.js',
+'./assets/js/docs-viewer.js'
+```
+
+---
+
+8️⃣ 📊 پیش‌نمایش خروجی
+
+```
+╔══════════════════════════════════════════════════════════╗
+║  📊 Documentation                                        ║
+╠══════════════════════════════════════════════════════════╣
+║  ┌─────┐ ┌─────┐ ┌─────┐ ┌──────────────────┐          ║
+║  │  1  │ │ 12  │ │  3  │ │  85% · Excellent │          ║
+║  │Cont.│ │Fnct.│ │Event│ │  ▓▓▓▓▓▓▓▓▓▓▓░░░  │          ║
+║  └─────┘ └─────┘ └─────┘ └──────────────────┘          ║
+╠══════════════════════════════════════════════════════════╣
+║  🔍[Search docs...]               ↧ Expand  ↥ Collapse   ║
+╠══════════════════════════════════════════════════════════╣
+║  Pragma    solidity ^0.8.20                              ║
+║  Imports   IERC20.sol  Ownable.sol  SafeMath.sol         ║
+╠══════════════════════════════════════════════════════════╣
+║  ▾ CONTRACT APZToken  inherits IERC20, Ownable           ║
+║    ┌──────────────────────────────────────────────────┐  ║
+║    │ 📢 NOTICE                                        │  ║
+║    │ Official APZ Chain token with capped supply      │  ║
+║    │                                                  │  ║
+║    │ ⚙️ DEV NOTES                                     │  ║
+║    │ Uses OpenZeppelin's ERC20 as base. Max supply    │  ║
+║    │ is 1 billion tokens.                             │  ║
+║    └──────────────────────────────────────────────────┘  ║
+║                                                          ║
+║    STATE VARIABLES                                       ║
+║    ┌──────────────────────────────────────────────────┐  ║
+║    │ uint256 public totalSupply                       │  ║
+║    │ mapping(address => uint256) private _balances    │  ║
+║    └──────────────────────────────────────────────────┘  ║
+║                                                          ║
+║    FUNCTIONS                                             ║
+║    ▸ [READ] balanceOf      view  public                  ║
+║    ▾ [WRITE] transfer      public                        ║
+║      ┌─────────────────────────────────────────────┐    ║
+║      │ function transfer(address to, uint256 amt)  │    ║
+║      │          public returns (bool)               │    ║
+║      │                                              │    ║
+║      │ PARAMS          RETURNS                     │    ║
+║      │ address to      bool                         │    ║
+║      │ uint256 amt                                  │    ║
+║      │                                              │    ║
+║      │ 📢 NOTICE                                    │    ║
+║      │ Transfers `amt` tokens from msg.sender to   │    ║
+║      │ `to`. Emits Transfer event.                 │    ║
+║      │                                              │    ║
+║      │ PARAMETERS                                   │    ║
+║      │   to    Recipient address                    │    ║
+║      │   amt   Amount of tokens to transfer         │    ║
+║      │                                              │    ║
+║      │ RETURNS                                      │    ║
+║      │   true if the transfer succeeded             │    ║
+║      └─────────────────────────────────────────────┘    ║
+║                                                          ║
+║    EVENTS                                                ║
+║    ▸ [event] Transfer                                    ║
+║    ▸ [event] Approval                                    ║
+╚══════════════════════════════════════════════════════════╝
+```
+
+---
+
+9️⃣ 🧪 تست
+
+تست پارسر:
+
+```javascript
+const source = `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+/// @title APZ Token
+/// @author Khalil Heyrani
+/// @notice Official token for APZ Chain
+/// @dev Uses OpenZeppelin ERC20
+contract APZToken {
+    /// @notice Total supply of tokens
+    uint256 public totalSupply;
+
+    /// @notice Transfer tokens to an address
+    /// @param to Recipient address
+    /// @param amount Amount to transfer
+    /// @return success Whether the transfer succeeded
+    function transfer(address to, uint256 amount) public returns (bool success) {
+        return true;
+    }
+}`;
+
+const parsed = APZ_NATSPEC.parseSource(source);
+console.log(JSON.stringify(parsed, null, 2));
+const stats = APZ_NATSPEC.getStats(parsed);
+console.log('Coverage:', stats.coverage + '%');
+```
+
+از UI:
+
+1. آدرس یک قرارداد verified را در Explorer وارد کنید
+2. تب Documentation را انتخاب کنید
+3. جستجو، Expand All، Collapse All، Copy signature را تست کنید
+4. لینک مستقیم به یک تابع: ?tab=docs#doc-fn-transfer
+
+---
+
+🔟 📋 چک‌لیست نهایی
+
+☐ natspec-parser.js ساخته شد
+☐ docs-generator.js ساخته شد
+☐ docs-viewer.js ساخته شد
+☐ docs-generator.css ساخته شد
+☐ explorer.html تب‌ها + اسکریپت‌ها اضافه شد
+☐ explorer.js ادغام شد
+☐ i18n (FA/EN/DE) اضافه شد
+☐ sw.js precache شد
+☐ تست با قرارداد verified موفق
+☐ Coverage محاسبه می‌شود
+☐ Search کار می‌کند
+☐ Copy signature کار می‌کند
+☐ Deep link به تابع کار می‌کند
+☐ Responsive موبایل
+☐ RTL فارسی
+
+---
+
+1️⃣1️⃣ 🎁 نکات پیشرفته
+
+1. جدول محتوا (TOC) کنار صفحه:
+
+```javascript
+function renderTOC(parsed) {
+  return `<nav class="doc-toc">${parsed.contracts.map(c => `
+    <div class="toc-contract">
+      <a href="#doc-contract-${c.name}">${c.name}</a>
+      <ul>
+        ${c.functions.map(f => `<li><a href="#doc-fn-${f.name}">${f.name}</a></li>`).join('')}
+      </ul>
+    </div>
+  `).join('')}</nav>`;
+}
+```
+
+2. Export به Markdown:
+
+```javascript
+function toMarkdown(parsed) {
+  let md = '';
+  for (const c of parsed.contracts) {
+    md += `# ${c.name}\n\n`;
+    if (c.docs.notice) md += `> ${c.docs.notice}\n\n`;
+    for (const fn of c.functions) {
+      md += `## \`${formatSignature(fn, 'function')}\`\n\n`;
+      if (fn.docs.notice) md += `${fn.docs.notice}\n\n`;
+    }
+  }
+  return md;
+}
+```
+
+3. تشخیص قراردادهای استاندارد:
+
+اگر قرارداد ERC20 یا ERC721 است، برچسب استاندارد اضافه کنید:
+
+```javascript
+function detectStandard(parsed) {
+  const fnNames = parsed.contracts[0]?.functions.map(f => f.name) || [];
+  if (fnNames.includes('transfer') && fnNames.includes('balanceOf') && fnNames.includes('approve')) {
+    return 'ERC20';
+  }
+  if (fnNames.includes('ownerOf') && fnNames.includes('safeTransferFrom')) {
+    return 'ERC721';
+  }
+  return null;
+}
+```
+
+4. Coverage Badge در Sourcify:
+
+اگر coverage < 50% باشد، هشدار نمایش دهید:
+
+```javascript
+if (stats.coverage < 50) {
+  showToast('Low NatSpec coverage — consider improving documentation', 'warning');
+}
+```

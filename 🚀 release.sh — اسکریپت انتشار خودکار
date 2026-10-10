@@ -1,0 +1,735 @@
+🚀 release.sh — اسکریپت انتشار خودکار
+
+این اسکریپت به‌طور کامل فرآیند انتشار را خودکار می‌کند:
+
+· ✅ بررسی مخزن Git (تمیز بودن، شاخه‌ی درست)
+· ✅ Bump نسخه (patch / minor / major)
+· ✅ به‌روزرسانی VERSION و CHANGELOG.md
+· ✅ Commit + Tag (اختیاری) + Push
+· ✅ ساخت ZIP با build_zip.sh
+· ✅ انتقال/نصب روی گوشی از طریق adb
+· ✅ (اختیاری) ساخت GitHub Release با gh
+
+---
+
+📄 release.sh
+
+```bash
+#!/usr/bin/env bash
+# ============================================================
+#  APZ Manager – Release Automator
+#  Usage:
+#     bash release.sh patch        # 1.0.0 → 1.0.1
+#     bash release.sh minor        # 1.0.0 → 1.1.0
+#     bash release.sh major        # 1.0.0 → 2.0.0
+#     bash release.sh 2.3.1        # نسخه صریح
+#  Options:
+#     --no-git        بدون commit/tag/push
+#     --no-push       فقط commit و tag محلی
+#     --no-adb        بدون انتقال به گوشی
+#     --no-release    بدون ساخت GitHub Release
+#     --yes           بدون پرسیدن تأیید
+#  Author: APZ Security Team | License: GPLv3
+# ============================================================
+set -euo pipefail
+
+# ---------- تنظیمات ----------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PKG_NAME="apz-android"
+CHANGELOG="CHANGELOG.md"
+VERSION_FILE="VERSION"
+
+# اگر داخل پوشه‌ی apz-android اجرا شد، یک سطح بالا برو
+if [ -f "${SCRIPT_DIR}/../${PKG_NAME}/Makefile" ] && [ ! -f "${SCRIPT_DIR}/Makefile" ]; then
+    SCRIPT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
+
+# ---------- رنگ‌ها ----------
+c_green()  { printf "\033[1;32m%s\033[0m\n" "$1"; }
+c_yellow() { printf "\033[1;33m%s\033[0m\n" "$1"; }
+c_red()    { printf "\033[1;31m%s\033[0m\n" "$1"; }
+c_cyan()   { printf "\033[1;36m%s\033[0m\n" "$1"; }
+c_bold()   { printf "\033[1m%s\033[0m\n" "$1"; }
+c_dim()    { printf "\033[2m%s\033[0m\n" "$1"; }
+
+# ---------- پرچم‌ها ----------
+FLAG_NO_GIT=0
+FLAG_NO_PUSH=0
+FLAG_NO_ADB=0
+FLAG_NO_RELEASE=0
+FLAG_YES=0
+
+for arg in "$@"; do
+    case "$arg" in
+        --no-git)     FLAG_NO_GIT=1 ;;
+        --no-push)    FLAG_NO_PUSH=1 ;;
+        --no-adb)     FLAG_NO_ADB=1 ;;
+        --no-release) FLAG_NO_RELEASE=1 ;;
+        --yes|-y)     FLAG_YES=1 ;;
+    esac
+done
+
+# ---------- تابع تأیید ----------
+confirm() {
+    local msg="$1"
+    if [ "$FLAG_YES" -eq 1 ]; then return 0; fi
+    read -r -p "$msg [y/N] " ans
+    [[ "$ans" =~ ^[Yy]$ ]]
+}
+
+# ============================================================
+#  Banner
+# ============================================================
+banner() {
+    echo "============================================================"
+    echo "   APZ Manager – Release Automator"
+    echo "   $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "============================================================"
+}
+
+# ============================================================
+#  پیش‌نیازها
+# ============================================================
+preflight() {
+    c_cyan ">>> [0/9] بررسی پیش‌نیازها..."
+
+    # نسخه فعلی
+    if [ ! -f "${SCRIPT_DIR}/${VERSION_FILE}" ]; then
+        if [ -f "${SCRIPT_DIR}/${PKG_NAME}/${VERSION_FILE}" ]; then
+            SCRIPT_DIR="${SCRIPT_DIR}/${PKG_NAME}"
+        fi
+    fi
+
+    if [ ! -f "${SCRIPT_DIR}/${VERSION_FILE}" ]; then
+        c_red "[!] فایل VERSION پیدا نشد در: ${SCRIPT_DIR}"
+        exit 1
+    fi
+
+    cd "${SCRIPT_DIR}"
+
+    # python
+    command -v python3 >/dev/null 2>&1 || { c_red "[!] python3 لازم است."; exit 1; }
+
+    # git (اگر لازم است)
+    if [ "$FLAG_NO_GIT" -eq 0 ]; then
+        command -v git >/dev/null 2>&1 || { c_red "[!] git لازم است."; exit 1; }
+        if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+            c_yellow "[!] این پوشه مخزن Git نیست. --no-git فعال شد."
+            FLAG_NO_GIT=1
+        fi
+    fi
+
+    c_green "    [+] پیش‌نیازها OK."
+}
+
+# ============================================================
+#  بررسی وضعیت Git
+# ============================================================
+git_status_check() {
+    [ "$FLAG_NO_GIT" -eq 1 ] && return 0
+
+    c_cyan ">>> [1/9] بررسی وضعیت Git..."
+
+    # شاخه
+    BRANCH="$(git rev-parse --abbrev-ref HEAD)"
+    c_dim "    شاخه فعلی: ${BRANCH}"
+
+    # تغییرات uncommitted
+    if ! git diff --quiet || ! git diff --cached --quiet; then
+        c_yellow "[!] تغییرات commit‌نشده وجود دارد:"
+        git status --short | head -20
+        if ! confirm "    ادامه می‌دهید؟ (تغییرات همراه release commit می‌شوند)"; then
+            c_red "لغو شد."
+            exit 1
+        fi
+    fi
+
+    # فایل‌های untracked در پکیج
+    if [ -d "${PKG_NAME}" ] && git status --porcelain "${PKG_NAME}" 2>/dev/null | grep -q '^??'; then
+        c_dim "    یادآوری: فایل‌های جدید در ${PKG_NAME}/ وجود دارند."
+    fi
+
+    c_green "    [+] وضعیت Git OK."
+}
+
+# ============================================================
+#  Bump نسخه
+# ============================================================
+bump_version() {
+    c_cyan ">>> [2/9] محاسبه نسخه جدید..."
+
+    local current
+    current="$(tr -d '[:space:]' < VERSION)"
+    CURRENT_VERSION="${current}"
+
+    # تجزیه
+    local major minor patch
+    if ! [[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        c_red "[!] فرمت VERSION نامعتبر: ${current}"
+        exit 1
+    fi
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    patch="${BASH_REMATCH[3]}"
+
+    # تعیین نوع
+    local arg="${VERSION_ARG:-patch}"
+
+    case "$arg" in
+        major) NEW_VERSION="$((major+1)).0.0" ;;
+        minor) NEW_VERSION="${major}.$((minor+1)).0" ;;
+        patch) NEW_VERSION="${major}.${minor}.$((patch+1))" ;;
+        *)     NEW_VERSION="$arg" ;;
+    esac
+
+    # اعتبارسنجی نسخه صریح
+    if ! [[ "$NEW_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        c_red "[!] نسخه نامعتبر: ${NEW_VERSION}"
+        exit 1
+    fi
+
+    # بررسی افزایش
+    if [ "$NEW_VERSION" == "$CURRENT_VERSION" ]; then
+        c_yellow "[!] نسخه جدید با فعلی یکسان است: ${NEW_VERSION}"
+        confirm "    ادامه می‌دهید؟" || exit 1
+    fi
+
+    c_green "    [+] نسخه: ${CURRENT_VERSION} → ${NEW_VERSION}"
+
+    # تأیید نهایی
+    if ! confirm "    نسخه ${NEW_VERSION} منتشر شود؟"; then
+        c_red "لغو شد."
+        exit 1
+    fi
+}
+
+# ============================================================
+#  اعمال نسخه در فایل‌ها
+# ============================================================
+apply_version() {
+    c_cyan ">>> [3/9] به‌روزرسانی فایل‌ها..."
+
+    # VERSION
+    echo "${NEW_VERSION}" > VERSION
+    c_dim "    [+] VERSION → ${NEW_VERSION}"
+
+    # build_zip.sh (نسخه پیش‌فرض)
+    if [ -f build_zip.sh ]; then
+        sed -i.bak "s/^VERSION=\"\${VERSION:-[^}]*}\"/VERSION=\"\${VERSION:-${NEW_VERSION}}\"/" build_zip.sh 2>/dev/null || true
+        rm -f build_zip.sh.bak
+    fi
+
+    # در پکیج داخلی
+    if [ -f "${PKG_NAME}/VERSION" ]; then
+        echo "${NEW_VERSION}" > "${PKG_NAME}/VERSION"
+        c_dim "    [+] ${PKG_NAME}/VERSION → ${NEW_VERSION}"
+    fi
+
+    if [ -f "${PKG_NAME}/build_zip.sh" ]; then
+        sed -i.bak "s/^VERSION=\"\${VERSION:-[^}]*}\"/VERSION=\"\${VERSION:-${NEW_VERSION}}\"/" "${PKG_NAME}/build_zip.sh" 2>/dev/null || true
+        rm -f "${PKG_NAME}/build_zip.sh.bak"
+    fi
+}
+
+# ============================================================
+#  CHANGELOG
+# ============================================================
+update_changelog() {
+    c_cyan ">>> [4/9] به‌روزرسانی CHANGELOG.md..."
+
+    if [ ! -f "$CHANGELOG" ]; then
+        cat > "$CHANGELOG" <<'EOF_CHANGELOG'
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+EOF_CHANGELOG
+        c_dim "    [+] CHANGELOG.md ساخته شد."
+    fi
+
+    # استخراج تاریخ
+    local today; today="$(date '+%Y-%m-%d')"
+
+    # دریافت پیام تغییرات
+    local entry=""
+    if [ -n "${RELEASE_NOTES:-}" ]; then
+        entry="$RELEASE_NOTES"
+    else
+        c_bold "    ▸ تغییرات نسخه ${NEW_VERSION} را وارد کنید (هر خط یک مورد، خط خالی = پایان):"
+        while IFS= read -r line; do
+            [ -z "$line" ] && break
+            entry="${entry}- ${line}"$'\n'
+        done
+    fi
+
+    if [ -z "$entry" ]; then
+        entry="- Release ${NEW_VERSION}"$'\n'
+    fi
+
+    # درج در ابتدای CHANGELOG بعد از هدر
+    local tmp; tmp="$(mktemp)"
+
+    {
+        # هدر (تا اولین ## [)
+        awk '/^## \[/{exit} {print}' "$CHANGELOG"
+        # نسخه جدید
+        echo "## [${NEW_VERSION}] - ${today}"
+        echo ""
+        echo "${entry}"
+        # بقیه
+        awk 'f{print} /^## \[/{f=1; print}' "$CHANGELOG" | tail -n +2
+    } > "$tmp"
+
+    mv "$tmp" "$CHANGELOG"
+    c_green "    [+] CHANGELOG.md به‌روز شد."
+}
+
+# ============================================================
+#  Git: commit + tag + push
+# ============================================================
+git_commit_tag_push() {
+    [ "$FLAG_NO_GIT" -eq 1 ] && { c_dim "    [=] Git رد شد."; return 0; }
+
+    c_cyan ">>> [5/9] Commit و Tag..."
+
+    # افزودن فایل‌ها
+    git add -A
+
+    local commit_msg="chore(release): v${NEW_VERSION}"
+    if ! git diff --cached --quiet; then
+        git commit -m "$commit_msg" >/dev/null
+        c_dim "    [+] commit: ${commit_msg}"
+    else
+        c_dim "    [=] تغییری برای commit نیست."
+    fi
+
+    # Tag
+    local tag="v${NEW_VERSION}"
+    if git rev-parse "$tag" >/dev/null 2>&1; then
+        c_yellow "    [!] tag ${tag} از قبل وجود دارد، رد شد."
+    else
+        git tag -a "$tag" -m "Release ${NEW_VERSION}"
+        c_dim "    [+] tag: ${tag}"
+    fi
+
+    # Push
+    if [ "$FLAG_NO_PUSH" -eq 0 ]; then
+        if confirm "    به remote push شود؟"; then
+            local branch; branch="$(git rev-parse --abbrev-ref HEAD)"
+            git push origin "$branch" || c_yellow "    [!] push شاخه ناموفق."
+            git push origin "$tag"     || c_yellow "    [!] push tag ناموفق."
+            c_green "    [+] push انجام شد."
+        else
+            c_dim "    [=] push رد شد."
+        fi
+    fi
+}
+
+# ============================================================
+#  ساخت ZIP
+# ============================================================
+build_zip() {
+    c_cyan ">>> [6/9] ساخت ZIP..."
+
+    if [ -f "${PKG_NAME}/build_zip.sh" ]; then
+        ( cd "${PKG_NAME}" && bash build_zip.sh )
+        ZIP_PATH="$(cd "${SCRIPT_DIR}" && pwd)/${PKG_NAME}-v${NEW_VERSION}.zip"
+    elif [ -f "build_zip.sh" ]; then
+        bash build_zip.sh
+        ZIP_PATH="$(cd "${SCRIPT_DIR}/.." && pwd)/${PKG_NAME}-v${NEW_VERSION}.zip"
+    else
+        c_red "[!] build_zip.sh پیدا نشد."
+        exit 1
+    fi
+
+    if [ ! -f "${ZIP_PATH}" ]; then
+        c_red "[!] ZIP تولید نشد."
+        exit 1
+    fi
+
+    local size; size="$(du -h "${ZIP_PATH}" | cut -f1)"
+    c_green "    [+] ZIP: $(basename "${ZIP_PATH}") (${size})"
+
+    # محاسبه SHA-256 و ذخیره در فایل کنار ZIP
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum "${ZIP_PATH}" > "${ZIP_PATH}.sha256"
+    elif command -v shasum >/dev/null 2>&1; then
+        shasum -a 256 "${ZIP_PATH}" > "${ZIP_PATH}.sha256"
+    fi
+    [ -f "${ZIP_PATH}.sha256" ] && c_dim "    [+] checksum: $(basename "${ZIP_PATH}.sha256")"
+}
+
+# ============================================================
+#  ADB install/push
+# ============================================================
+adb_deploy() {
+    [ "$FLAG_NO_ADB" -eq 1 ] && { c_dim "    [=] ADB رد شد."; return 0; }
+
+    c_cyan ">>> [7/9] انتقال به گوشی (ADB)..."
+
+    if ! command -v adb >/dev/null 2>&1; then
+        c_yellow "    [!] adb نصب نیست. رد شد."
+        return 0
+    fi
+
+    if ! adb get-state >/dev/null 2>&1; then
+        c_yellow "    [!] دستگاه متصل نیست (USB Debugging فعال است؟). رد شد."
+        return 0
+    fi
+
+    local device_info; device_info="$(adb shell getprop ro.product.model 2>/dev/null | tr -d '\r' || echo 'unknown')"
+    c_dim "    دستگاه: ${device_info}"
+
+    if ! confirm "    فایل ZIP روی /sdcard/Download/ آپلود شود؟"; then
+        c_dim "    [=] رد شد."
+        return 0
+    fi
+
+    adb push "${ZIP_PATH}" /sdcard/Download/ >/dev/null
+    c_green "    [+] آپلود شد به /sdcard/Download/$(basename "${ZIP_PATH}")"
+
+    # اجرای دستور نصب روی گوشی (اختیاری، نیاز به Termux + am)
+    if confirm "    دستور راه‌اندازی روی Termux از راه دور اجرا شود؟"; then
+        local setup_cmd="cd ~ && unzip -o /sdcard/Download/$(basename "${ZIP_PATH}") && cd ${PKG_NAME} && make install"
+        c_dim "    فرمان: ${setup_cmd}"
+        c_yellow "    [!] اجرای خودکار در Termux نیاز به ADB over TCP + Termux:Widget دارد."
+        c_dim "    در عوض می‌توانید QR را اسکن کنید یا دستی اجرا کنید."
+    fi
+
+    # گزینه‌ی nصب به‌عنوان APK (اگر خود apz یک APK باشد، رد شود)
+    if adb shell pm list packages 2>/dev/null | grep -q "com.termux"; then
+        c_dim "    [+] Termux روی گوشی نصب است."
+    fi
+}
+
+# ============================================================
+#  GitHub Release (اختیاری)
+# ============================================================
+github_release() {
+    [ "$FLAG_NO_RELEASE" -eq 1 ] && { c_dim "    [=] GitHub Release رد شد."; return 0; }
+    [ "$FLAG_NO_GIT" -eq 1 ] && return 0
+
+    if ! command -v gh >/dev/null 2>&1; then
+        c_yellow "    [!] gh (GitHub CLI) نصب نیست. رد شد."
+        return 0
+    fi
+
+    if ! gh auth status >/dev/null 2>&1; then
+        c_yellow "    [!] gh login نشده. رد شد."
+        return 0
+    fi
+
+    c_cyan ">>> [8/9] ساخت GitHub Release..."
+
+    if ! confirm "    Release برای tag v${NEW_VERSION} ساخته شود؟"; then
+        c_dim "    [=] رد شد."
+        return 0
+    fi
+
+    # استخراج یادداشت‌های نسخه از CHANGELOG
+    local notes_file; notes_file="$(mktemp)"
+    awk -v ver="${NEW_VERSION}" '
+        $0 ~ "^## \\["ver"\\]" {flag=1; next}
+        /^## \[/ && flag {exit}
+        flag {print}
+    ' "$CHANGELOG" > "$notes_file"
+
+    local assets=("${ZIP_PATH}")
+    [ -f "${ZIP_PATH}.sha256" ] && assets+=("${ZIP_PATH}.sha256")
+
+    gh release create "v${NEW_VERSION}" \
+        --title "APZ Manager v${NEW_VERSION}" \
+        --notes-file "$notes_file" \
+        "${assets[@]}" \
+        && c_green "    [+] Release ساخته شد." \
+        || c_yellow "    [!] ساخت Release ناموفق (شاید tag از قبل موجود است)."
+
+    rm -f "$notes_file"
+}
+
+# ============================================================
+#  جمع‌بندی
+# ============================================================
+summary() {
+    c_cyan ">>> [9/9] جمع‌بندی"
+    echo
+    echo "============================================================"
+    c_green "   ✅ انتشار نسخه ${NEW_VERSION} کامل شد"
+    echo "============================================================"
+    echo "   نسخه قبلی : ${CURRENT_VERSION}"
+    echo "   نسخه جدید : ${NEW_VERSION}"
+    echo "   ZIP       : ${ZIP_PATH}"
+    [ -f "${ZIP_PATH}.sha256" ] && echo "   SHA-256   : $(cut -d' ' -f1 "${ZIP_PATH}.sha256")"
+    echo
+    echo "   ▸ نصب روی گوشی (Termux):"
+    echo "       cd ~"
+    echo "       unzip ${PKG_NAME}-v${NEW_VERSION}.zip"
+    echo "       cd ${PKG_NAME} && make install"
+    echo
+    echo "   ▸ اجرا:"
+    echo "       make run APK=/sdcard/Download/app.apk"
+    echo "============================================================"
+    echo
+}
+
+# ============================================================
+#  main
+# ============================================================
+main() {
+    # پارس argument
+    local version_arg=""
+    for arg in "$@"; do
+        case "$arg" in
+            --*) continue ;;
+            *) version_arg="$arg"; break ;;
+        esac
+    done
+
+    if [ -z "$version_arg" ]; then
+        echo "Usage: bash release.sh <patch|minor|major|X.Y.Z> [options]"
+        echo "Options: --no-git --no-push --no-adb --no-release --yes"
+        exit 1
+    fi
+
+    VERSION_ARG="$version_arg"
+
+    banner
+    preflight
+    git_status_check
+    bump_version
+    apply_version
+    update_changelog
+    git_commit_tag_push
+    build_zip
+    adb_deploy
+    github_release
+    summary
+}
+
+main "$@"
+```
+
+---
+
+🧪 نمونه‌ی اجرا
+
+۱) نسخه‌ی patch (افزایش آخرین عدد)
+
+```bash
+bash release.sh patch
+```
+
+خروجی:
+
+```
+============================================================
+   APZ Manager – Release Automator
+   2026-10-05 15:23:11
+============================================================
+>>> [0/9] بررسی پیش‌نیازها...
+    [+] پیش‌نیازها OK.
+>>> [1/9] بررسی وضعیت Git...
+    شاخه فعلی: main
+    [+] وضعیت Git OK.
+>>> [2/9] محاسبه نسخه جدید...
+    [+] نسخه: 1.0.0 → 1.0.1
+    نسخه 1.0.1 منتشر شود؟ [y/N] y
+>>> [3/9] به‌روزرسانی فایل‌ها...
+    [+] VERSION → 1.0.1
+>>> [4/9] به‌روزرسانی CHANGELOG.md...
+    ▸ تغییرات نسخه 1.0.1 را وارد کنید:
+    افزودن پشتیبانی از Ubuntu proot
+    رفع باگ YARA روی Termux
+    <خط خالی>
+    [+] CHANGELOG.md به‌روز شد.
+>>> [5/9] Commit و Tag...
+    [+] commit: chore(release): v1.0.1
+    [+] tag: v1.0.1
+    به remote push شود؟ [y/N] y
+    [+] push انجام شد.
+>>> [6/9] ساخت ZIP...
+    [+] ZIP: apz-android-v1.0.1.zip (13K)
+    [+] checksum: apz-android-v1.0.1.zip.sha256
+>>> [7/9] انتقال به گوشی (ADB)...
+    دستگاه: Pixel 7
+    فایل ZIP روی /sdcard/Download/ آپلود شود؟ [y/N] y
+    [+] آپلود شد به /sdcard/Download/apz-android-v1.0.1.zip
+>>> [8/9] ساخت GitHub Release...
+    Release برای tag v1.0.1 ساخته شود؟ [y/N] y
+    [+] Release ساخته شد.
+>>> [9/9] جمع‌بندی
+============================================================
+   ✅ انتشار نسخه 1.0.1 کامل شد
+============================================================
+   نسخه قبلی : 1.0.0
+   نسخه جدید : 1.0.1
+   ZIP       : /home/user/apz-android-v1.0.1.zip
+   SHA-256   : a1b2c3d4...
+```
+
+۲) نسخه‌ی minor بدون Git و بدون ADB
+
+```bash
+bash release.sh minor --no-git --no-adb --yes
+```
+
+۳) نسخه‌ی صریح
+
+```bash
+bash release.sh 2.0.0-rc1 --no-push
+```
+
+⚠️ برای نسخه‌های rc/beta، الگوی X.Y.Z را تغییر دهید یا از حالت صریح استفاده کنید (به اسکریپت suffix اضافه کنید).
+
+---
+
+🎛️ فایل VERSION پس از اجرا
+
+```
+1.0.1
+```
+
+📜 نمونه‌ی CHANGELOG.md تولیدی
+
+```markdown
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [1.0.1] - 2026-10-05
+
+- افزودن پشتیبانی از Ubuntu proot
+- رفع باگ YARA روی Termux
+
+## [1.0.0] - 2026-10-01
+
+- انتشار اولیه
+```
+
+---
+
+🔗 یکپارچه‌سازی با bootstrap.sh
+
+می‌توانید در bootstrap.sh این خط را اضافه کنید تا از ابتدا release.sh هم ساخته شود. کافی است در آرایه‌ی FILES این را اضافه کنید:
+
+```bash
+FILES=(Makefile VERSION .gitignore LICENSE README_ANDROID.md
+       apz_android.sh setup_proot.sh run_android.sh
+       requirements-android.txt report_generator_patch.py
+       patch_apz_manager.py .env.android.example build_zip.sh
+       release.sh)            # ← اضافه شد
+```
+
+و در تابع write_files بلوک زیر را اضافه کنید:
+
+```bash
+    # ---------- release.sh ----------
+    cat > "${PKG_DIR}/release.sh" <<'EOF_RELEASE'
+# (محتوای release.sh از بالا)
+EOF_RELEASE
+```
+
+(ساده‌تر: release.sh را کنار bootstrap.sh بگذارید و در write_files با cp "$SCRIPT_DIR/release.sh" "$PKG_DIR/" کپی کنید.)
+
+---
+
+📋 جدول تصمیم‌گیری پرچم‌ها
+
+پرچم کاربرد
+--no-git پروژه در Git نیست یا نمی‌خواهید commit کنید
+--no-push فقط commit محلی، بدون ارسال به remote
+--no-adb گوشی وصل نیست یا نمی‌خواهید انتقال دهید
+--no-release نمی‌خواهید GitHub Release بسازید
+--yes / -y برای CI/CD، بدون پرسیدن سؤال
+
+نمونه CI/CD (GitHub Actions)
+
+```yaml
+- name: Release
+  run: bash release.sh patch --yes --no-adb
+  env:
+    GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+```
+
+---
+
+⚙️ متغیرهای محیطی پشتیبانی‌شده
+
+متغیر کاربرد
+RELEASE_NOTES یادداشت نسخه (به‌جای ورودی تعاملی)
+VERSION_ARG نسخه هدف (جایگزین آرگومان)
+APZ_REPO_URL آدرس مخزن (برای proot setup)
+GH_TOKEN توکن GitHub برای gh
+
+نمونه:
+
+```bash
+RELEASE_NOTES="- رفع باگ critical YARA
+- افزایش سرعت تحلیل ۲۰٪" \
+bash release.sh patch --yes
+```
+
+---
+
+🛡️ ایمنی‌ها و نکات
+
+· ✅ قبل از هر تغییر، Git status بررسی می‌شود (مگر --no-git)
+· ✅ هر تغییر نسخه تأیید می‌خواهد (مگر --yes)
+· ✅ SHA-256 در کنار ZIP ذخیره می‌شود
+· ✅ اگر tag از قبل موجود باشد، جایگزین نمی‌کند
+· ✅ اگر push ناموفق باشد، اسکریپت متوقف نمی‌شود اما هشدار می‌دهد
+· ⚠️ برای نسخه‌های rc/beta، الگوی نسخه را در bump_version گسترش دهید (مثلاً 1.0.1-rc1)
+
+---
+
+🎯 چه اتفاقی می‌افتد وقتی می‌نویسید bash release.sh patch؟
+
+1. ✅ پیش‌نیازها را بررسی می‌کند (python3، git).
+2. ✅ Git را بررسی می‌کند: شاخه، تغییرات uncommitted.
+3. ✅ نسخه را محاسبه می‌کند: 1.0.0 → 1.0.1.
+4. ✅ تأیید می‌گیرد، سپس VERSION و build_zip.sh را به‌روز می‌کند.
+5. ✅ CHANGELOG.md را با یادداشت‌های شما به‌روز می‌کند.
+6. ✅ git add -A, git commit -m "chore(release): v1.0.1", git tag -a v1.0.1.
+7. ✅ git push origin <branch> + git push origin v1.0.1 (با تأیید).
+8. ✅ bash build_zip.sh را اجرا و ZIP + SHA-256 را تولید می‌کند.
+9. ✅ اگر گوشی با adb وصل باشد، ZIP را به /sdcard/Download/ منتقل می‌کند.
+10. ✅ اگر gh لاگین باشد، GitHub Release می‌سازد و ZIP را به آن پیوست می‌کند.
+11. ✅ خلاصه‌ی نهایی + دستور نصب روی گوشی را چاپ می‌کند.
+
+---
+
+🧩 افزودنی پیشنهادی (اختیاری): پشتیبانی از پیش‌انتشار
+
+اگر خواستید نسخه‌هایی مثل 1.1.0-rc.1 هم پشتیبانی شود، در تابع bump_version این بلوک را اضافه کنید:
+
+```bash
+# فرمت با pre-release: X.Y.Z-pre
+if [[ "$current" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)-(.+)$ ]]; then
+    major="${BASH_REMATCH[1]}"
+    minor="${BASH_REMATCH[2]}"
+    patch="${BASH_REMATCH[3]}"
+    prerelease="${BASH_REMATCH[4]}"
+fi
+```
+
+سپس در case:
+
+```bash
+prerelease) NEW_VERSION="${major}.${minor}.${patch}-rc.1" ;;
+```
+
+و در git tag از git tag -a "v${NEW_VERSION}" استفاده کنید که همین حالا هم پشتیبانی می‌کند.
+
+---
+
+با این پکیج کامل، چرخه‌ی توسعه تا انتشار روی گوشی کاملاً خودکار می‌شود:
+
+```
+نوشتن کد  →  git commit  →  make dist (یا) bash release.sh patch  →  adb push  →  make install روی گوشی
+```

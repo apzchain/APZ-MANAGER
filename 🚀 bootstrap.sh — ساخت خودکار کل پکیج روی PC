@@ -1,0 +1,910 @@
+🚀 bootstrap.sh — ساخت خودکار کل پکیج روی PC
+
+این اسکریپت همه‌ی فایل‌های پکیج را می‌سازد، ساختار درست را چیده، ZIP را تولید می‌کند و سپس گزینه‌های انتقال به گوشی (adb / HTTP LAN + QR / دستی) را نمایش می‌دهد.
+
+💡 نکته فنی: برای جلوگیری از خراب‌شدن Tabهای Makefile در کپی/پیست، از placeholder @@TAB@@ استفاده شده و در انتها با Python به Tab واقعی تبدیل می‌شود.
+
+---
+
+📄 bootstrap.sh
+
+```bash
+#!/usr/bin/env bash
+# ============================================================
+#  APZ Manager – Android Bootstrap (اجرا روی PC)
+#  می‌سازد: کل ساختار apz-android/ + ZIP + راهنمای انتقال
+#  استفاده:  bash bootstrap.sh
+#  Author: APZ Security Team | License: GPLv3
+# ============================================================
+set -euo pipefail
+
+# ---------- تنظیمات ----------
+PKG_NAME="apz-android"
+VERSION="1.0.0"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PKG_DIR="${SCRIPT_DIR}/${PKG_NAME}"
+ZIP_NAME="${PKG_NAME}-v${VERSION}.zip"
+HTTP_PORT="${APZ_HTTP_PORT:-8000}"
+
+# ---------- رنگ‌ها ----------
+c_green()  { printf "\033[1;32m%s\033[0m\n" "$1"; }
+c_yellow() { printf "\033[1;33m%s\033[0m\n" "$1"; }
+c_red()    { printf "\033[1;31m%s\033[0m\n" "$1"; }
+c_cyan()   { printf "\033[1;36m%s\033[0m\n" "$1"; }
+c_bold()   { printf "\033[1m%s\033[0m\n" "$1"; }
+
+banner() {
+    echo "============================================================"
+    echo "   APZ Manager – Android Bootstrap (PC → ZIP → Phone)      "
+    echo "   Version: ${VERSION}"
+    echo "============================================================"
+}
+
+need_python() {
+    if ! command -v python3 >/dev/null 2>&1; then
+        c_red "[!] python3 لازم است. لطفاً نصب کنید."
+        exit 1
+    fi
+}
+
+prepare_dirs() {
+    c_cyan ">>> [1/6] ساخت ساختار پوشه‌ها..."
+    rm -rf "${PKG_DIR}"
+    mkdir -p "${PKG_DIR}/rules"
+    touch "${PKG_DIR}/rules/.keep"
+    cat > "${PKG_DIR}/rules/.keep" <<'KEEP'
+# قوانین YARA خود را در این پوشه قرار دهید (.yar)
+KEEP
+    c_green "    [+] ${PKG_DIR}"
+}
+
+# ============================================================
+#  ساخت فایل‌ها
+# ============================================================
+write_files() {
+    c_cyan ">>> [2/6] نوشتن فایل‌های پکیج..."
+
+    # ---------- VERSION ----------
+    cat > "${PKG_DIR}/VERSION" <<EOF_VERSION
+${VERSION}
+EOF_VERSION
+
+    # ---------- Makefile ----------
+    cat > "${PKG_DIR}/Makefile" <<'EOF_MAKEFILE'
+# ============================================================
+#  APZ Manager – Android/Termux Makefile
+#  نصب کامل با یک دستور:  make install
+#  Author: APZ Security Team | License: GPLv3
+# ============================================================
+
+SHELL := bash
+.DEFAULT_GOAL := help
+
+HOME_DIR    := $(HOME)
+OUT_DIR     ?= $(HOME_DIR)/apz-reports
+REPO_URL    ?= https://github.com/your-org/apz-manager.git
+
+PROJECT_DIR := $(shell if [ -f apz_manager.py ]; then pwd; \
+                       else echo "$(HOME_DIR)/apz-manager"; fi)
+
+VENV_DIR    := $(PROJECT_DIR)/venv
+PIP         := $(VENV_DIR)/bin/pip
+PY          := $(VENV_DIR)/bin/python
+ACTIVATE    := . $(VENV_DIR)/bin/activate
+
+APK   ?=
+LIST  ?=
+
+.PHONY: help
+help:
+@@TAB@@@echo ""
+@@TAB@@@echo "📦  APZ Manager – Android Makefile"
+@@TAB@@@echo "------------------------------------------------------------"
+@@TAB@@@echo "  make install          نصب کامل در Termux (توصیه‌شده)"
+@@TAB@@@echo "  make proot            نصب کامل با Ubuntu proot (PDF + YARA)"
+@@TAB@@@echo "  make check            بررسی صحت نصب"
+@@TAB@@@echo "  make run APK=path     تحلیل یک فایل APK"
+@@TAB@@@echo "  make batch LIST=f     تحلیل دسته‌ای"
+@@TAB@@@echo "  make api              اجرای سرور RESTful API"
+@@TAB@@@echo "  make env              ساخت فایل ~/.apz.env"
+@@TAB@@@echo "  make storage          فعال‌سازی دسترسی به /sdcard"
+@@TAB@@@echo "  make dist             ساخت فایل ZIP قابل توزیع"
+@@TAB@@@echo "  make clean            حذف venv و کش‌ها"
+@@TAB@@@echo "  make clean-all        حذف venv + گزارش‌ها"
+@@TAB@@@echo "------------------------------------------------------------"
+@@TAB@@@echo "  پروژه در: $(PROJECT_DIR)"
+@@TAB@@@echo "  گزارش‌ها: $(OUT_DIR)"
+@@TAB@@@echo ""
+
+.PHONY: install
+install: preflight termux-deps clone venv deps patch check storage-dirs footer
+
+.PHONY: preflight
+preflight:
+@@TAB@@@if [ ! -d "/data/data/com.termux" ]; then \
+@@TAB@@@    echo "⚠️  این Makefile باید داخل Termux اجرا شود."; \
+@@TAB@@@    exit 1; \
+@@TAB@@@fi
+@@TAB@@@echo ">>> [0/7] محیط Termux تأیید شد."
+
+.PHONY: termux-deps
+termux-deps:
+@@TAB@@@echo ">>> [1/7] نصب پیش‌نیازهای Termux..."
+@@TAB@@@pkg update -y
+@@TAB@@@pkg upgrade -y
+@@TAB@@@pkg install -y \
+@@TAB@@@    python python-pip git make clang binutils pkg-config rust \
+@@TAB@@@    libxml2 libxslt libffi openssl zlib libjpeg-turbo freetype \
+@@TAB@@@    libyaml libcrypt libandroid-support termux-api
+@@TAB@@@echo ">>> [1/7] ✅ پیش‌نیازها نصب شدند."
+
+.PHONY: clone
+clone:
+@@TAB@@@if [ -f "apz_manager.py" ]; then \
+@@TAB@@@    echo ">>> [2/7] پروژه در همین شاخه است."; \
+@@TAB@@@else \
+@@TAB@@@    echo ">>> [2/7] دریافت/به‌روزرسانی از $(REPO_URL)..."; \
+@@TAB@@@    if [ -d "$(PROJECT_DIR)/.git" ]; then \
+@@TAB@@@        cd "$(PROJECT_DIR)" && git pull --rebase; \
+@@TAB@@@    else \
+@@TAB@@@        git clone "$(REPO_URL)" "$(PROJECT_DIR)"; \
+@@TAB@@@    fi; \
+@@TAB@@@fi
+
+.PHONY: venv
+venv:
+@@TAB@@@echo ">>> [3/7] ساخت محیط مجازی..."
+@@TAB@@@if [ ! -d "$(VENV_DIR)" ]; then python -m venv "$(VENV_DIR)"; fi
+@@TAB@@@$(PIP) install --upgrade pip wheel setuptools
+@@TAB@@@echo ">>> [3/7] ✅ venv آماده است."
+
+.PHONY: deps
+deps:
+@@TAB@@@echo ">>> [4/7] نصب وابستگی‌های پایتون..."
+@@TAB@@@if [ -f "$(PROJECT_DIR)/requirements-android.txt" ]; then \
+@@TAB@@@    $(PIP) install -r "$(PROJECT_DIR)/requirements-android.txt"; \
+@@TAB@@@else \
+@@TAB@@@    $(PIP) install androguard pyyaml flask sqlalchemy yara-python requests rich; \
+@@TAB@@@fi
+@@TAB@@@echo ">>> [4/7] ✅ وابستگی‌ها نصب شدند."
+
+.PHONY: patch
+patch:
+@@TAB@@@echo ">>> [5/7] اعمال پچ‌های اندروید..."
+@@TAB@@@if [ -f "$(PROJECT_DIR)/patch_apz_manager.py" ]; then \
+@@TAB@@@    cd "$(PROJECT_DIR)" && $(PY) patch_apz_manager.py || true; \
+@@TAB@@@fi
+@@TAB@@@if [ -f "$(PROJECT_DIR)/report_generator_patch.py" ] && [ -f "$(PROJECT_DIR)/report_generator.py" ]; then \
+@@TAB@@@    [ -f "$(PROJECT_DIR)/report_generator.py.android.bak" ] || \
+@@TAB@@@        cp "$(PROJECT_DIR)/report_generator.py" "$(PROJECT_DIR)/report_generator.py.android.bak"; \
+@@TAB@@@    cp "$(PROJECT_DIR)/report_generator_patch.py" "$(PROJECT_DIR)/report_generator.py"; \
+@@TAB@@@fi
+@@TAB@@@echo ">>> [5/7] ✅ پچ‌ها اعمال شد."
+
+.PHONY: check
+check:
+@@TAB@@@echo ">>> [6/7] بررسی صحت نصب..."
+@@TAB@@@$(PY) -c "import androguard,yara,flask,sqlalchemy,requests; print('    [+] OK')"
+
+.PHONY: storage-dirs
+storage-dirs:
+@@TAB@@@mkdir -p "$(OUT_DIR)"
+@@TAB@@@echo ">>> [7/7] پوشه‌ی گزارش‌ها: $(OUT_DIR)"
+
+.PHONY: footer
+footer:
+@@TAB@@@echo ""
+@@TAB@@@echo "============================================================"
+@@TAB@@@echo "   ✅ نصب APZ Manager روی اندروید کامل شد"
+@@TAB@@@echo "============================================================"
+
+.PHONY: run
+run:
+@@TAB@@@if [ -z "$(APK)" ]; then echo "Usage: make run APK=/path/app.apk"; exit 1; fi
+@@TAB@@@mkdir -p "$(OUT_DIR)"
+@@TAB@@@NAME=$$(basename "$(APK)" .apk); \
+@@TAB@@@STAMP=$$(date +%Y%m%d_%H%M%S); \
+@@TAB@@@OUT="$(OUT_DIR)/$${NAME}_$${STAMP}.json"; \
+@@TAB@@@echo ">>> تحلیل: $(APK)"; \
+@@TAB@@@echo ">>> خروجی: $$OUT"; \
+@@TAB@@@cd "$(PROJECT_DIR)" && $(ACTIVATE) && \
+@@TAB@@@    python apz_manager.py --file "$(APK)" --output "$$OUT" --db; \
+@@TAB@@@if command -v termux-notification >/dev/null 2>&1; then \
+@@TAB@@@    termux-notification --title "APZ Manager" \
+@@TAB@@@        --content "تحلیل $$NAME کامل شد." || true; \
+@@TAB@@@fi
+
+.PHONY: batch
+batch:
+@@TAB@@@if [ -z "$(LIST)" ]; then echo "Usage: make batch LIST=list.txt"; exit 1; fi
+@@TAB@@@mkdir -p "$(OUT_DIR)"
+@@TAB@@@OUT="$(OUT_DIR)/batch_$$(date +%Y%m%d_%H%M%S).json"; \
+@@TAB@@@cd "$(PROJECT_DIR)" && $(ACTIVATE) && \
+@@TAB@@@    python apz_manager.py --batch "$(LIST)" --output "$$OUT" --db; \
+@@TAB@@@echo "[+] گزارش: $$OUT"
+
+.PHONY: api
+api:
+@@TAB@@@cd "$(PROJECT_DIR)" && $(ACTIVATE) && \
+@@TAB@@@    echo ">>> API روی http://127.0.0.1:5000" && \
+@@TAB@@@    python apz_api.py
+
+.PHONY: proot
+proot:
+@@TAB@@@if [ -f "setup_proot.sh" ]; then bash setup_proot.sh; \
+@@TAB@@@else echo "[!] setup_proot.sh پیدا نشد."; exit 1; fi
+
+.PHONY: env
+env:
+@@TAB@@@if [ ! -f "$$HOME/.apz.env" ] && [ -f ".env.android.example" ]; then \
+@@TAB@@@    cp ".env.android.example" "$$HOME/.apz.env"; \
+@@TAB@@@    echo "[+] ساخته شد: ~/.apz.env"; \
+@@TAB@@@fi
+@@TAB@@@if ! grep -q "apz.env" "$$HOME/.bashrc" 2>/dev/null; then \
+@@TAB@@@    echo '[ -f ~/.apz.env ] && set -a && . ~/.apz.env && set +a' >> "$$HOME/.bashrc"; \
+@@TAB@@@    echo "[+] به ~/.bashrc اضافه شد."; \
+@@TAB@@@fi
+
+.PHONY: storage
+storage:
+@@TAB@@@termux-setup-storage || true
+
+.PHONY: fix-tabs
+fix-tabs:
+@@TAB@@@python3 -c "from pathlib import Path; p=Path('Makefile'); p.write_text(p.read_text().replace('@@TAB@@','\t'))"
+@@TAB@@@echo "[+] Tabها بررسی شد."
+
+.PHONY: dist zip
+dist zip:
+@@TAB@@@bash build_zip.sh
+
+.PHONY: clean
+clean:
+@@TAB@@@rm -rf "$(VENV_DIR)"
+@@TAB@@@find "$(PROJECT_DIR)" -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+@@TAB@@@find "$(PROJECT_DIR)" -type f -name "*.pyc" -delete 2>/dev/null || true
+
+.PHONY: clean-all
+clean-all: clean
+@@TAB@@@rm -rf "$(OUT_DIR)"
+EOF_MAKEFILE
+
+    # ---------- requirements-android.txt ----------
+    cat > "${PKG_DIR}/requirements-android.txt" <<'EOF_REQS'
+# ============================================================
+#  APZ Manager – Android/Termux requirements
+# ============================================================
+androguard>=3.4.0
+pyyaml>=6.0
+yara-python>=4.3.0
+flask>=2.0
+sqlalchemy>=1.4
+requests>=2.28
+rich>=13.0
+python-dotenv>=1.0
+jinja2>=3.0
+
+# weasyprint>=60.0   # ← فقط در Ubuntu proot
+EOF_REQS
+
+    # ---------- .gitignore ----------
+    cat > "${PKG_DIR}/.gitignore" <<'EOF_GITIGNORE'
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.coverage
+*.android.bak
+*.bak
+*.orig
+*.rej
+.env
+.env.*
+!.env.android.example
+*.key
+*.pem
+apz-reports/
+*.db
+*.sqlite
+*.sqlite3
+out/
+dist/
+build/
+*.zip
+!build_zip.sh
+.DS_Store
+Thumbs.db
+*.log
+EOF_GITIGNORE
+
+    # ---------- LICENSE ----------
+    cat > "${PKG_DIR}/LICENSE" <<'EOF_LICENSE'
+APZ Manager – Android Bootstrap
+Copyright (C) 2026  APZ Security Team
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+EOF_LICENSE
+
+    # ---------- README_ANDROID.md ----------
+    cat > "${PKG_DIR}/README_ANDROID.md" <<'EOF_README'
+# 📱 APZ Manager روی اندروید
+
+## 🚀 نصب سریع
+
+```bash
+cd ~/apz-android && make install
+```
+
+▶️ اجرا
+
+```bash
+make storage                                # یک‌بار
+make run APK=/sdcard/Download/app.apk
+make api                                    # سرور
+```
+
+📂 گزارش‌ها
+
+~/apz-reports/*.json|html|pdf + ~/apz-reports/apz.db
+
+🧠 نسخه‌ی کامل (PDF + YARA)
+
+```bash
+make proot
+```
+
+🩺 عیب‌یابی
+
+مشکل راه‌حل
+yara نصب نمی‌شود pkg install libyara-dev && pip install yara-python --no-cache-dir
+PDF نمی‌خواهم نیازی به proot نیست
+دسترسی /sdcard termux-setup-storage
+
+📜 مجوز
+
+GPLv3
+EOF_README
+
+APZ Manager – Android env sample
+
+cp .env.android.example ~/.apz.env  و مقادیر را پر کنید.
+
+APZ_VT_API_KEY=""
+APZ_HA_API_KEY=""
+APZ_MD_API_KEY=""
+APZ_AI_API_KEY=""
+APZ_DEFAULT_OUTDIR="$HOME/apz-reports"
+APZ_DB_PATH="$HOME/apz-reports/apz.db"
+APZ_LOG_LEVEL="INFO"
+APZ_TIMEOUT=30
+EOF_ENV
+
+#!/data/data/com.termux/files/usr/bin/bash
+
+APZ Manager - Termux native installer (wrapper روی Makefile)
+
+set -e
+cd "$(dirname "$0")"
+exec make install
+EOF_APZ_ANDROID
+
+#!/data/data/com.termux/files/usr/bin/bash
+
+APZ Manager - Quick runner
+
+set -e
+cd "$(dirname "$0")"
+if [ "$1" == "--api" ]; then exec make api; fi
+if [ "$1" == "--batch" ]; then exec make batch LIST="$2"; fi
+if [ -z "$1" ]; then echo "Usage: run_android.sh /path/app.apk"; exit 1; fi
+exec make run APK="$1"
+EOF_RUN
+
+#!/data/data/com.termux/files/usr/bin/bash
+
+APZ Manager - Ubuntu proot installer (PDF + YARA کامل)
+
+set -e
+DISTRO="ubuntu"
+c_cyan() { printf "\033[1;36m%s\033[0m\n" "$1"; }
+c_green() { printf "\033[1;32m%s\033[0m\n" "$1"; }
+
+c_cyan ">>> نصب proot-distro..."
+pkg install -y proot-distro
+
+c_cyan ">>> نصب Ubuntu..."
+proot-distro list | grep -q "$DISTRO.*installed" || proot-distro install "$DISTRO"
+
+cat > "$HOME/ubuntu_setup.sh" <<'UBUNTU_EOF'
+#!/bin/bash
+set -e
+export DEBIAN_FRONTEND=noninteractive
+apt update && apt upgrade -y
+apt install -y python3 python3-pip python3-venv git curl wget 
+    build-essential pkg-config libyara-dev yara 
+    libxml2-dev libxslt1-dev libffi-dev 
+    libjpeg-dev libfreetype6-dev zlib1g-dev 
+    libpango-1.0-0 libpangoft2-1.0-0 libcairo2 shared-mime-info
+cd /root
+[ -d apz-manager ] || git clone https://github.com/your-org/apz-manager.git
+cd apz-manager
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip wheel setuptools
+pip install androguard pyyaml flask sqlalchemy yara-python weasyprint requests rich
+python -c "import androguard,yara,flask,sqlalchemy,weasyprint; print('OK')"
+UBUNTU_EOF
+
+chmod +x "$HOME/ubuntu_setup.sh"
+c_cyan ">>> اجرای نصب داخل Ubuntu..."
+proot-distro login "$DISTRO" --shared-tmp -- /bin/bash "$HOME/ubuntu_setup.sh"
+c_green "✅ Ubuntu proot آماده است. برای ورود: proot-distro login $DISTRO"
+EOF_PROOT
+
+#!/usr/bin/env python3
+
+-- coding: utf-8 --
+
+"""report_generator_patch.py – نسخه سازگار با اندروید (بدون weasyprint اجباری)."""
+from future import annotations
+import json, os, platform
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+PDF_SUPPORTED = False
+HTML_CLASS = None
+try:
+from weasyprint import HTML as HTML_CLASS  # type: ignore
+PDF_SUPPORTED = True
+except Exception:
+PDF_SUPPORTED = False
+
+IS_ANDROID = ("ANDROID_ROOT" in os.environ) or ("com.termux" in os.environ.get("PREFIX", ""))
+
+def _risk_color(level: str) -> str:
+return {"CRITICAL":"#8b0000","HIGH":"#d9534f","MEDIUM":"#f0ad4e",
+"LOW":"#5bc0de","CLEAN":"#5cb85c","UNKNOWN":"#777"}.get((level or "").upper(),"#777")
+
+def _findings_to_rows(findings):
+if not findings:
+return "<tr><td colspan='4' style='text-align:center;color:#888;'>یافته‌ای نیست.</td></tr>"
+rows = []
+for f in findings:
+title = f.get("title_fa") or f.get("title") or "-"
+w = f.get("weight", 0)
+d = f.get("detail_fa") or f.get("detail") or ""
+ev = f.get("evidence") or []
+if isinstance(ev, list):
+ev = "
+".join(f"<code>{e}</code>" for e in ev)
+rows.append(f"<tr><td><b>{title}</b></td><td style='text-align:center;'>{w}</td><td>{d}</td><td>{ev}</td></tr>")
+return "\n".join(rows)
+
+def _list_to_html(items, empty_msg="—"):
+if not items: return f"<span style='color:#888;'>{empty_msg}</span>"
+if isinstance(items, (str, bytes)): return f"<code>{items}</code>"
+return "<ul>" + "".join(f"<li><code>{i}</code></li>" for i in items) + "</ul>"
+
+class ReportGenerator:
+def init(self, report: Dict[str, Any]):
+self.report = report or {}
+self.file = self.report.get("file", "unknown.apk")
+self.sha256 = self.report.get("sha256", "-")
+self.risk_score = self.report.get("risk_score", 0)
+self.risk_level = self.report.get("risk_level", "UNKNOWN")
+self.confidence = self.report.get("confidence", 0)
+self.sandbox_verdict = self.report.get("sandbox_verdict", "-")
+self.findings = self.report.get("findings", []) or []
+self.permissions = self.report.get("permissions", []) or []
+self.limitations = self.report.get("limitations", []) or []
+self.iocs = self.report.get("iocs", {}) or {}
+self.mitre = self.report.get("mitre", []) or []
+self.recommendations = self.report.get("recommendations", []) or []
+
+<html lang="fa" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>APZ Report – {self.file}</title>
+<style>
+body{{font-family:Tahoma,Arial,sans-serif;background:#f7f7f9;margin:0;padding:16px;color:#222}}
+.card{{background:#fff;border-radius:10px;padding:16px;box-shadow:0 1px 4px rgba(0,0,0,.08);margin-bottom:16px}}
+h1{{font-size:18px;margin:0 0 8px}} h2{{font-size:16px;margin:16px 0 8px;border-right:4px solid {color};padding-right:8px}}
+.score{{display:flex;gap:16px;align-items:center;flex-wrap:wrap}}
+.score .val{{font-size:38px;font-weight:bold;color:{color}}}
+.badge{{display:inline-block;padding:4px 10px;border-radius:20px;color:#fff;background:{color};font-weight:bold}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}
+th,td{{padding:8px;border-bottom:1px solid #eee;vertical-align:top;text-align:right}}
+th{{background:#fafafa}} code{{background:#f2f2f2;padding:1px 4px;border-radius:4px;font-size:12px;word-break:break-all}}
+.meta{{font-size:12px;color:#666}} .footer{{text-align:center;color:#888;font-size:11px;margin-top:20px}}
+ul{{padding-right:18px}}
+</style></head><body>
+<div class="card">
+<h1>📦 گزارش تحلیل امنیتی APZ Manager</h1>
+<div class="meta">فایل: <code>{self.file}</code></div>
+<div class="meta">SHA-256: <code>{self.sha256}</code></div>
+<div class="meta">تاریخ: {now} | پلتفرم: {platform.system()} {platform.release()}</div>
+<div class="meta">وضعیت PDF: {pdf_note}</div>
+</div>
+<div class="card"><h2>🎯 خلاصه ریسک</h2>
+<div class="score"><div class="val">{self.risk_score}</div>
+<div><div class="badge">{self.risk_level}</div>
+<div style="margin-top:6px;">اطمینان: <b>{self.confidence}%</b></div>
+<div>Sandbox: <b>{self.sandbox_verdict}</b></div></div></div></div>
+<div class="card"><h2>🔍 یافته‌ها</h2>
+<table><thead><tr><th>عنوان</th><th>وزن</th><th>توضیح</th><th>شواهد</th></tr></thead>
+<tbody>{rows}</tbody></table></div>
+<div class="card"><h2>🔐 مجوزها</h2>{_list_to_html(self.permissions, "مجوز خاصی نیست.")}</div>
+<div class="card"><h2>🌐 IOCها</h2>{iocs_html}</div>
+<div class="card"><h2>🎯 MITRE ATT&CK</h2>{mitre_html}</div>
+<div class="card"><h2>✅ توصیه‌ها</h2>{_list_to_html(self.recommendations, "—")}</div>
+<div class="card"><h2>⚠️ محدودیت‌ها</h2>{_list_to_html(self.limitations, "—")}</div>
+<div class="footer">APZ Manager – گزارش خودکار | {now}</div>
+</body></html>"""
+
+def generate_html_report(report, output_path):
+return ReportGenerator(report).save_html(output_path)
+
+def generate_pdf_report(report, output_path):
+return ReportGenerator(report).save_pdf(output_path)
+
+def generate_json_report(report, output_path):
+return ReportGenerator(report).save_json(output_path)
+
+if name == "main":
+print(f"[i] PDF Supported: {PDF_SUPPORTED}")
+print(f"[i] Android: {IS_ANDROID}")
+EOF_REPORT
+
+#!/usr/bin/env python3
+
+-- coding: utf-8 --
+
+"""patch_apz_manager.py – پچ خودکار برای سازگاری با اندروید."""
+from future import annotations
+import os, re, shutil
+from pathlib import Path
+
+TARGETS = ["apz_manager.py", "apz_api.py", "apz_orchestrator.py"]
+BACKUP_SUFFIX = ".android.bak"
+
+def is_android() -> bool:
+return ("ANDROID_ROOT" in os.environ) or ("com.termux" in os.environ.get("PREFIX", ""))
+
+def backup(path: Path) -> None:
+bak = path.with_suffix(path.suffix + BACKUP_SUFFIX)
+if not bak.exists():
+shutil.copy2(path, bak)
+print(f"[+] بکاپ: {bak}")
+
+def patch_tkinter(path: Path) -> bool:
+src = path.read_text(encoding="utf-8")
+if "TKINTER_AVAILABLE" in src: return False
+pat = re.compile(r"^(import tkinter.|from tkinter import .)$", re.MULTILINE)
+if not pat.search(src): return False
+def _w(m): return ("try:\n    " + m.group(0) + "\n    TKINTER_AVAILABLE = True\n"
+"except Exception:\n    TKINTER_AVAILABLE = False\n")
+new, n = pat.subn(_w, src, count=1)
+if n:
+path.write_text(new, encoding="utf-8")
+print(f"[+] tkinter guard: {path.name}")
+return True
+return False
+
+def patch_weasyprint(path: Path) -> bool:
+src = path.read_text(encoding="utf-8")
+if "WEASYPRINT_AVAILABLE" in src: return False
+pat = re.compile(r"^(from weasyprint import .+|import weasyprint.*)$", re.MULTILINE)
+if not pat.search(src): return False
+def _w(m): return ("try:\n    " + m.group(0) + "\n    WEASYPRINT_AVAILABLE = True\n"
+"except Exception:\n    WEASYPRINT_AVAILABLE = False\n")
+new, n = pat.subn(_w, src, count=1)
+if n:
+path.write_text(new, encoding="utf-8")
+print(f"[+] weasyprint guard: {path.name}")
+return True
+return False
+
+def patch_default_outdir(path: Path) -> bool:
+src = path.read_text(encoding="utf-8")
+if "APZ_DEFAULT_OUTDIR" in src: return False
+inject = ("\n# --- APZ Android Patch ---\n"
+"import pathlib as _apz_pl\n"
+"APZ_DEFAULT_OUTDIR = _apz_pl.Path.home() / 'apz-reports'\n"
+"APZ_DEFAULT_OUTDIR.mkdir(parents=True, exist_ok=True)\n"
+"# --- End APZ Patch ---\n\n")
+lines = src.splitlines(keepends=True)
+at = 0
+for i, ln in enumerate(lines[:60]):
+if ln.startswith(("import ", "from ")) or ln.strip() == "": at = i + 1
+else: break
+path.write_text("".join(lines[:at]) + inject + "".join(lines[at:]), encoding="utf-8")
+print(f"[+] APZ_DEFAULT_OUTDIR: {path.name}")
+return True
+
+def main() -> None:
+root = Path(file).resolve().parent
+print(f"[i] شاخه: {root}")
+print(f"[i] Android: {is_android()}")
+changed = False
+for name in TARGETS:
+p = root / name
+if not p.exists():
+print(f"[=] {name} نیست، رد شد."); continue
+backup(p)
+changed |= patch_tkinter(p) | patch_weasyprint(p) | patch_default_outdir(p)
+print("✅ پچ‌ها اعمال شد." if changed else "[=] تغییری لازم نبود.")
+
+if name == "main":
+main()
+EOF_PATCH
+
+#!/usr/bin/env bash
+set -e
+VERSION="$(cat VERSION 2>/dev/null || echo '1.0.0')"
+PKG_NAME="apz-android"
+OUT_ZIP="$(pwd)/../${PKG_NAME}-v${VERSION}.zip"
+c_cyan() { printf "\033[1;36m%s\033[0m\n" "$1"; }
+c_green() { printf "\033[1;32m%s\033[0m\n" "$1"; }
+c_red() { printf "\033[1;31m%s\033[0m\n" "$1"; }
+
+rm -f "$OUT_ZIP"
+command -v zip >/dev/null 2>&1 || pkg install -y zip 2>/dev/null || {
+command -v zip >/dev/null 2>&1 || { c_red "[!] zip موجود نیست."; exit 1; }
+}
+
+FILES=(Makefile VERSION .gitignore LICENSE README_ANDROID.md
+apz_android.sh setup_proot.sh run_android.sh
+requirements-android.txt report_generator_patch.py
+patch_apz_manager.py .env.android.example build_zip.sh)
+
+MISS=()
+for f in "${FILES[@]}"; do [ -f "$f" ] || MISS+=("$f"); done
+if [ ${#MISS[@]} -gt 0 ]; then
+c_red "[!] فایل‌های ناموجود:"; for m in "${MISS[@]}"; do echo "  - $m"; done; exit 1
+fi
+
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+mkdir -p "${TMP}/${PKG_NAME}/rules"
+for f in "${FILES[@]}"; do cp -p "$f" "${TMP}/${PKG_NAME}/"; done
+echo "# قوانین YARA خود را اینجا بگذارید (.yar)" > "${TMP}/${PKG_NAME}/rules/.keep"
+
+c_cyan ">>> فشرده‌سازی..."
+( cd "$TMP" && zip -r -q "$OUT_ZIP" "$PKG_NAME" )
+c_green "============================================================"
+c_green "  ✅ ZIP: $(basename "$OUT_ZIP")  ($(du -h "$OUT_ZIP"|cut -f1))"
+c_green "============================================================"
+EOF_BUILD
+
+from pathlib import Path
+p = Path("${PKG_DIR}/Makefile")
+p.write_text(p.read_text(encoding="utf-8").replace("@@TAB@@", "\t"), encoding="utf-8")
+PYFIX
+
+}
+
+============================================================
+
+ساخت ZIP
+
+============================================================
+
+build_zip() {
+c_cyan ">>> [3/6] ساخت ZIP..."
+( cd "${PKG_DIR}" && bash build_zip.sh )
+    ZIP_PATH="${SCRIPT_DIR}/${ZIP_NAME}"
+    if [ ! -f "${ZIP_PATH}" ]; then
+c_red "[!] ZIP ساخته نشد."
+exit 1
+fi
+}
+
+============================================================
+
+انتقال به گوشی
+
+============================================================
+
+detect_adb() {
+command -v adb >/dev/null 2>&1 || return 1
+adb get-state >/dev/null 2>&1
+}
+
+try_adb_push() {
+if detect_adb; then
+c_cyan ">>> [4/6] adb شناسایی شد. انتقال به گوشی..."
+adb push "${ZIP_PATH}" /sdcard/Download/ && {
+            c_green "    [+] منتقل شد به /sdcard/Download/${ZIP_NAME}"
+return 0
+}
+fi
+return 1
+}
+
+detect_lan_ip() {
+if command -v ip >/dev/null 2>&1; then
+ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' | head -1 && return
+fi
+if command -v ifconfig >/dev/null 2>&1; then
+ifconfig 2>/dev/null | grep -oP 'inet \K[\d.]+' | grep -v '127.0.0.1' | head -1 && return
+fi
+echo "127.0.0.1"
+}
+
+render_qr() {
+local data="$1"
+    if command -v qrencode >/dev/null 2>&1; then
+        qrencode -t ANSIUTF8 "${data}"
+return 0
+fi
+if python3 -c "import qrcode" >/dev/null 2>&1; then
+python3 - <<PYQR
+import qrcode
+q = qrcode.QRCode(border=1)
+q.add_data("""${data}""")
+q.make()
+q.print_ascii(invert=True)
+PYQR
+return 0
+fi
+c_yellow "    [!] qrencode یا python-qrcode نصب نیست (برای QR نصب کنید: pip install qrcode)."
+return 1
+}
+
+offer_http_transfer() {
+local ip; ip="$(detect_lan_ip)"
+    local url="http://${ip}:${HTTP_PORT}/${ZIP_NAME}"
+local cmd="cd ~ && curl -O ${url} && unzip ${ZIP_NAME} && cd ${PKG_NAME} && make install"
+
+}
+
+print_manual() {
+cat <<EOF_MANUAL
+
+============================================================
+✅ پکیج آماده است
+============================================================
+مسیر پروژه : ${PKG_DIR}
+   فایل ZIP   : ${ZIP_PATH}
+حجم ZIP    : $(du -h "${ZIP_PATH}" | cut -f1)
+
+انتقال دستی:
+1) فایل ZIP را با USB / Google Drive / Telegram به گوشی بفرستید
+2) در Termux:
+cd ~
+unzip ${ZIP_NAME}
+          cd ${PKG_NAME}
+make install
+
+گزینه‌های دیگر:
+• adb push ${ZIP_NAME} /sdcard/Download/
+• یا از منوی LAN در بالا استفاده کنید
+
+============================================================
+EOF_MANUAL
+}
+
+============================================================
+
+main
+
+============================================================
+
+main() {
+banner
+need_python
+prepare_dirs
+write_files
+build_zip
+
+}
+
+main "$@"
+
+```
+
+---
+
+## 🧭 نحوه‌ی استفاده
+
+```bash
+# 1) این فایل را در یک پوشه‌ی خالی روی PC ذخیره کنید
+cd ~/projects
+nano bootstrap.sh        # محتوای بالا را بچسبانید
+chmod +x bootstrap.sh
+
+# 2) اجرا
+bash bootstrap.sh
+```
+
+خروجی مورد انتظار
+
+```
+============================================================
+   APZ Manager – Android Bootstrap (PC → ZIP → Phone)
+   Version: 1.0.0
+============================================================
+>>> [1/6] ساخت ساختار پوشه‌ها...
+>>> [2/6] نوشتن فایل‌های پکیج...
+>>> [3/6] ساخت ZIP...
+============================================================
+  ✅ ZIP: apz-android-v1.0.0.zip  (12K)
+============================================================
+>>> [4/6] adb شناسایی شد. انتقال به گوشی...   ← اگر adb وصل باشد
+   یا
+>>> [5/6] گزینه‌ی انتقال از طریق LAN...
+    IP کامپیوتر: 192.168.1.42
+    URL: http://192.168.1.42:8000/apz-android-v1.0.0.zip
+    ▸ روی گوشی (Termux):
+      cd ~ && curl -O http://192.168.1.42:8000/apz-android-v1.0.0.zip && \
+      unzip apz-android-v1.0.0.zip && cd apz-android && make install
+    ▸ QR:
+      ████████████████████
+      ██ ▄▄▄▄▄ █▀▄██ ▄▄▄▄▄ ██
+      ...
+```
+
+---
+
+🎯 سه مسیر انتقال پیشنهادی
+
+مسیر پیش‌نیاز سرعت توضیح
+adb push adb نصب + USB Debugging فعال ⚡ سریع ZIP به /sdcard/Download/ می‌رود
+LAN + QR هر دو در یک Wi-Fi + python3 یا qrencode 🚀 راحت اسکن QR → دستور curl در Termux
+دستی — 🐢 کند USB / تلگرام / Drive
+
+---
+
+🧩 وابستگی‌های اختیاری روی PC (برای بهترین تجربه)
+
+ابزار نصب کاربرد
+adb sudo apt install adb (Linux) / platform-tools (Win/Mac) انتقال مستقیم
+qrencode sudo apt install qrencode / brew install qrencode QR ترمینالی
+python3 -m qrcode pip install qrcode جایگزین QR
+python3 قطعاً نصب است جایگزینی Tab + سرور HTTP
+
+اگر هیچ‌کدام نبودند، اسکریپت به‌طور خودکار به انتقال دستی می‌افتد.
+
+---
+
+📋 چک‌لیست پس از اجرای bootstrap.sh
+
+☐ پوشه‌ی apz-android/ با ۱۳ فایل ساخته شد
+☐ فایل apz-android-v1.0.0.zip در پوشه‌ی والد تولید شد
+☐ Tabهای Makefile معتبرند (تست: make -C apz-android help روی PC خطا نداد)
+☐ اگر adb وصل بود → ZIP روی /sdcard/Download/ گوشی است
+☐ اگر LAN استفاده شد → QR نمایش داده شد و سرور HTTP اجرا شد
+☐ روی گوشی در Termux: make install با موفقیت اجرا می‌شود
+
+---
+
+🔁 استفاده‌ی مجدد
+
+هر بار که تغییری در فایل‌های پکیج دادید:
+
+```bash
+# فقط ZIP را دوباره بسازید
+cd apz-android
+make dist
+```
+
+یا کل فرآیند را از صفر:
+
+```bash
+bash bootstrap.sh
+```

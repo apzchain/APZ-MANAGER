@@ -1,0 +1,334 @@
+ 
+---
+
+📋 پیش‌نیازهای F-Droid
+
+برنامه باید شرایط زیر را داشته باشد:
+
+· مخزن سورس‌کد عمومی با کد واقعی و به‌روز
+· لایسنس FOSS (شما GPLv3 دارید ✅)
+· فقط وابستگی‌های FOSS — Firebase، GMS، Crashlytics و هر SDK تبلیغاتی/رهگیری ممنوع است
+· ابزارهای ساخت FOSS — نیاز به IDE اختصاصی نباشد (شما Gradle CLI دارید ✅)
+· تگ نسخه روی هر release commit (مثلاً v1.0.0)
+· مجوز نویسنده (اگر خودتان مالک هستید، نیازی نیست)
+
+---
+
+📁 گام ۱ — افزودن متادیتای بالادست (Upstream Metadata)
+
+این فایل‌ها را در مخزن خودتان (نه fdroiddata) در مسیر fastlane/metadata/android/ قرار دهید:
+
+```
+fastlane/metadata/android/
+├── en-US/
+│   ├── short_description.txt        ← حداکثر ۸۰ کاراکتر، بدون نقطه انتهایی
+│   ├── full_description.txt         ← حداکثر ۴۰۰۰ کاراکتر
+│   ├── changelogs/
+│   │   └── 1.txt                    ← برای versionCode=1 (حداکثر ۵۰۰ کاراکتر)
+│   └── images/
+│       ├── icon.png                 ← ۵۱۲×۵۱۲ پیکسل
+│       └── phoneScreenshots/
+│           ├── 1.png                ← اسکرین‌شات
+│           └── 2.png                ← حداقل ۲ اسکرین‌شات
+└── fa-IR/
+    ├── short_description.txt
+    ├── full_description.txt
+    ├── changelogs/
+    │   └── 1.txt
+    └── images/
+        ├── icon.png
+        └── phoneScreenshots/
+            ├── 1.png
+            └── 2.png
+```
+
+محتوای پیشنهادی:
+
+en-US/short_description.txt:
+
+```
+Offline APK security analyzer with YARA, MITRE ATT&CK & local AI.
+```
+
+en-US/full_description.txt: (همان متن Store Listing که قبلاً آماده کردید)
+
+en-US/changelogs/1.txt:
+
+```
+Initial release: static APK analysis, YARA scanner, MITRE ATT&CK mapping, local AI via Ollama, VirusTotal/MetaDefender integration, Persian UI.
+```
+
+fa-IR/short_description.txt:
+
+```
+تحلیل امنیتی APK به‌صورت کاملاً آفلاین با YARA، MITRE و AI محلی.
+```
+
+نکته: F-Droid فقط از en-US برای Store Listing استفاده می‌کند، اما سایر زبان‌ها را هم پشتیبانی می‌کند.
+
+---
+
+🔧 گام ۲ — حل مشکل Chaquopy در F-Droid
+
+⚠️ این مهم‌ترین چالش فنی شماست. F-Droid برنامه را در یک محیط ایزوله و بدون دسترسی به اینترنت برای دانلود pip packageها کامپایل می‌کند. Chaquopy به‌طور پیش‌فرض سعی می‌کند androguard و yara-python را از PyPI دانلود کند که در build server F-Droid کار نمی‌کند.
+
+راه‌حل‌های موجود:
+
+گزینه A — استفاده از prebuild برای دانلود از قبل (توصیه‌شده)
+
+در فایل متادیتای F-Droid (که در گام ۳ می‌سازید)، از فیلد prebuild استفاده کنید:
+
+```yaml
+prebuild: |
+  export PIP_INDEX_URL=https://pypi.org/simple/
+  pip download -d pip-cache androguard==4.1.2 yara-python==4.5.1 pyyaml==6.0.2 requests==2.32.3
+```
+
+سپس در build.gradle.kts به Chaquopy بگویید از این cache استفاده کند:
+
+```kotlin
+python {
+    version = "3.11"
+    pip {
+        // از cache محلی استفاده کن
+        install("androguard==4.1.2")
+        install("yara-python==4.5.1")
+        install("pyyaml==6.0.2")
+        install("requests==2.32.3")
+    }
+}
+```
+
+گزینه B — استفاده از scanignore
+
+اگر Chaquopy نتواند در build server F-Droid کار کند، ممکن است نیاز به scanignore داشته باشید:
+
+```yaml
+scanignore:
+  - apz-android/app/src/main/python/
+scandelete:
+  - apz-android/app/src/main/assets/
+```
+
+این به F-Droid می‌گوید که فایل‌های پایتون را نادیده بگیرد، اما ممکن است باعث رد شدن شود چون F-Droid باید مطمئن شود که هیچ کد غیرآزادی وجود ندارد.
+
+گزینه C — استفاده از srclibs
+
+کتابخانه‌های پایتون را به‌عنوان srclibs تعریف کنید:
+
+```yaml
+srclibs:
+  - androguard@v4.1.2
+  - yara-python@v4.5.1
+```
+
+⚠️ هشدار: اگر Chaquopy در F-Droid نتواند build کند، ممکن است برنامه اصلاً پذیرفته نشود. قبل از ارسال MR، حتماً با fdroid build محلی تست کنید.
+
+---
+
+📝 گام ۳ — نوشتن فایل متادیتای F-Droid
+
+Repository fdroiddata را fork کنید و فایل metadata/com.apz.manager.yml را بسازید:
+
+```bash
+# Fork در GitLab
+# سپس:
+git clone --depth=1 https://gitlab.com/YOUR_ACCOUNT/fdroiddata ~/fdroiddata
+cd ~/fdroiddata
+git checkout -b com.apz.manager
+cp templates/build-gradle.yml metadata/com.apz.manager.yml
+```
+
+metadata/com.apz.manager.yml:
+
+```yaml
+Categories:
+  - Security
+License: GPL-3.0-or-later
+AuthorName: APZ Security Team
+AuthorEmail: support@apz-security.com
+AuthorWebSite: https://github.com/your-org/apz-manager
+WebSite: https://github.com/your-org/apz-manager
+SourceCode: https://github.com/your-org/apz-manager
+IssueTracker: https://github.com/your-org/apz-manager/issues
+Changelog: https://github.com/your-org/apz-manager/releases
+
+AutoName: APZ Manager
+
+RepoType: git
+Repo: https://github.com/your-org/apz-manager.git
+
+Builds:
+  - versionName: 1.0.0
+    versionCode: 1
+    commit: v1.0.0
+    subdir: apz-android
+    gradle:
+      - yes
+    prebuild: |
+      export PIP_INDEX_URL=https://pypi.org/simple/
+      pip download -d pip-cache androguard==4.1.2 yara-python==4.5.1 pyyaml==6.0.2 requests==2.32.3
+    scanignore:
+      - apz-android/app/src/main/python/
+    scandelete:
+      - apz-android/app/src/main/assets/
+
+AutoUpdateMode: Version
+UpdateCheckMode: Tags
+CurrentVersion: 1.0.0
+CurrentVersionCode: 1
+```
+
+توضیح فیلدها:
+
+فیلد توضیح
+Categories دسته‌بندی (از config/categories.yml در fdroiddata انتخاب کنید)
+License باید با SPDX identifier باشد
+RepoType / Repo نوع و آدرس مخزن
+Builds[].commit تگ نسخه (مثلاً v1.0.0)
+Builds[].subdir زیرپوشه‌ای که build.gradle.kts در آن است
+Builds[].gradle yes یعنی F-Droid با Gradle build می‌کند
+prebuild اسکریپت bash قبل از build (برای دانلود pip packages)
+scanignore مسیرهایی که F-Droid نباید اسکن کند
+AutoUpdateMode: Version F-Droid از تگ‌ها نسخه‌های جدید را تشخیص می‌دهد
+UpdateCheckMode: Tags نحوه چک کردن نسخه جدید
+
+---
+
+🧪 گام ۴ — تست محلی با fdroid build
+
+قبل از ارسال MR، حتماً محلی تست کنید:
+
+```bash
+# نصب fdroidserver
+pip install fdroidserver
+
+# تنظیم config
+cd ~/fdroiddata
+cp ../fdroidserver/examples/config.yml .
+nano config.yml   # مسیرها را تنظیم کنید
+
+# ساخت برنامه
+fdroid build com.apz.manager:1
+
+# اگر موفق بود، APK در unsigned/ ساخته می‌شود
+```
+
+خطاهای رایج:
+
+خطا راه‌حل
+Chaquopy cannot compile native code yara-python نیاز به کامپایل native دارد — از prebuild برای دانلود wheel آماده استفاده کنید
+pip: command not found python3-pip را در prebuild نصب کنید
+Non-free dependency همه وابستگی‌ها را بررسی کنید (هیچ Firebase/GMS نباید باشد)
+Gradle cache not supported در gradle.properties خط org.gradle.configuration-cache=true را false کنید
+
+---
+
+🚀 گام ۵ — ارسال Merge Request
+
+```bash
+cd ~/fdroiddata
+git add metadata/com.apz.manager.yml
+git commit -m "New app: APZ Manager"
+git push origin com.apz.manager
+```
+
+سپس در GitLab یک Merge Request به fdroid/fdroiddata بزنید:
+
+· عنوان: New app: APZ Manager
+· توضیح: هدف برنامه، لایسنس، و اینکه خودتان مالک هستید
+· منتظر review از تیم F-Droid بمانید (ممکن است چند هفته طول بکشد)
+
+---
+
+🔄 گام ۶ — گزینه جایگزین: RFP (ساده‌تر)
+
+اگر نمی‌خواهید MR بزنید، می‌توانید Request for Packaging ثبت کنید:
+
+1. برو به https://gitlab.com/fdroid/rfp/-/issues
+2. New Issue با عنوان: APZ Manager - APK Security Analyzer
+3. اطلاعات زیر را بنویسید:
+
+```markdown
+**App name:** APZ Manager
+**Package:** com.apz.manager
+**Source:** https://github.com/your-org/apz-manager
+**License:** GPL-3.0-or-later
+**Description:** Offline APK security analyzer with YARA, MITRE ATT&CK, and local AI.
+**Categories:** Security
+**Build system:** Gradle (apz-android subdir)
+**Chaquopy:** Uses Python via Chaquopy for androguard and YARA.
+**Notes:** Needs prebuild step for pip packages. See build metadata draft attached.
+```
+
+RFP کندتر از MR است — ممکن است ماه‌ها طول بکشد. MR توصیه می‌شود.
+
+---
+
+📊 مقایسه Google Play vs F-Droid
+
+مورد Google Play F-Droid
+هزینه ۲۵ دلار رایگان
+APK آپلود ✅ (AAB) ❌ (خودش build می‌کند)
+امضا خودتان F-Droid
+زمان review ۳-۷ روز چند هفته
+Chaquopy مشکلی ندارد نیاز به تنظیمات ویژه
+تستر ۱۲ تستر × ۱۴ روز ندارد
+Privacy Policy اجباری توصیه‌شده
+Data Safety اجباری ندارد
+
+---
+
+✅ چک‌لیست نهایی F-Droid
+
+```markdown
+## Pre-Submission Checklist
+
+### Source
+- [ ] مخزن عمومی با کد واقعی
+- [ ] LICENSE = GPL-3.0-or-later
+- [ ] تگ v1.0.0 روی commit
+- [ ] هیچ وابستگی غیرآزادی (Firebase/GMS/Crashlytics)
+- [ ] build.gradle.kts در apz-android/
+
+### Upstream Metadata
+- [ ] fastlane/metadata/android/en-US/short_description.txt
+- [ ] fastlane/metadata/android/en-US/full_description.txt
+- [ ] fastlane/metadata/android/en-US/images/icon.png (512×512)
+- [ ] fastlane/metadata/android/en-US/images/phoneScreenshots/1.png
+- [ ] fastlane/metadata/android/en-US/images/phoneScreenshots/2.png
+- [ ] fastlane/metadata/android/en-US/changelogs/1.txt
+
+### fdroiddata Metadata
+- [ ] Fork fdroiddata
+- [ ] metadata/com.apz.manager.yml ساخته شده
+- [ ] prebuild برای Chaquopy pip packages
+- [ ] scanignore/scandelete تنظیم شده
+- [ ] fdroid build محلی موفق
+
+### Submission
+- [ ] MR به fdroid/fdroiddata
+- [ ] یا RFP issue در gitlab.com/fdroid/rfp
+```
+
+---
+
+⚠️ نکات حیاتی
+
+1. Chaquopy بزرگ‌ترین ریسک است. F-Droid build server ممکن است نتواند yara-python را کامپایل کند. حتماً قبل از MR، fdroid build محلی را تست کنید.
+2. حجم APK: Chaquopy + Python + YARA ممکن است APK را بزرگ کند. F-Droid محدودیت سخت‌گیرانه‌ای ندارد، اما حجم بالا می‌تواند review را کند کند.
+3. scanignore با احتیاط: اگر کد پایتون را ignore کنید، F-Droid نمی‌تواند مطمئن شود که کد غیرآزاد نیست. ترجیحاً همه چیز را قابل اسکن بگذارید.
+4. تگ نسخه: هر release باید تگ داشته باشد. اگر تگ ندارید، F-Droid نمی‌تواند نسخه‌های جدید را تشخیص دهد.
+5. صبر: review F-Droid ممکن است ۲-۶ هفته طول بکشد. برای انتشار سریع، GitHub Releases را موازی داشته باشید.
+
+---
+
+📚 منابع
+
+· F-Droid Submission Quick Start Guide
+· Build Metadata Reference
+· Inclusion How-To
+· fdroiddata GitLab
+· RFP Issue Tracker
+
+---

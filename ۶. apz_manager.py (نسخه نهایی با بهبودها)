@@ -1,0 +1,363 @@
+import json, os, re, hashlib, zipfile, threading, urllib.request, urllib.error, time, logging
+from pathlib import Path
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, scrolledtext
+from threat_platform import ThreatPlatform, YaraScanner
+from reputation_engine import MultiReputationEngine
+from axml_parser import extract_permissions_and_components
+from sandbox_adapter import SandboxAdapter
+from report_generator import ReportGenerator
+import yaml
+
+# تنظیم لاگ
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
+
+APP = "APZ Manager Windows"
+APP_DIR = Path.home() / ".apz_manager"
+REPORT_DIR = APP_DIR / "reports"
+REPORT_DIR.mkdir(parents=True, exist_ok=True)
+
+# بارگذاری تنظیمات
+CONFIG_PATH = Path(__file__).parent / "config.yaml"
+if CONFIG_PATH.exists():
+    with open(CONFIG_PATH, 'r', encoding='utf-8') as f:
+        CONFIG = yaml.safe_load(f)
+else:
+    CONFIG = {"sandbox": {"simulate": True}, "yara_rules_dir": "rules"}
+
+TOKENS = [
+    "keylogger","stealer","spyware","ransom","credential","password",
+    "injector","hook","frida","xposed","rootkit","miner","cryptominer"
+]
+
+# ========== توابع تحلیل ==========
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024*1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def printable_hits(data):
+    text = data.decode("utf-8", errors="ignore")
+    return [t for t in TOKENS if re.search(r"(?i)" + re.escape(t), text)]
+
+def analyze_apk(path, progress_callback=None):
+    path = Path(path)
+    if not zipfile.is_zipfile(path):
+        raise ValueError("فایل APK معتبر نیست.")
+
+    findings, positives, perms = [], [], []
+    native = set()
+    suspicious = set()
+    classes = []
+    size = path.stat().st_size
+    sha = sha256_file(path)
+
+    # مرحله ۱: استخراج اولیه از ZIP
+    with zipfile.ZipFile(path) as z:
+        names = z.namelist()
+        native.update(n.split("/")[1] for n in names if n.startswith("lib/") and n.count("/") >= 2)
+        classes = [n for n in names if n.endswith(".dex")]
+        if progress_callback:
+            progress_callback(20, "استخراج رشته‌های مشکوک...")
+        for n in names:
+            if n.endswith((".dex",".txt",".json",".xml")):
+                try:
+                    data = z.read(n)
+                    if len(data) > 2_000_000:
+                        data = data[:2_000_000]
+                    for token in printable_hits(data):
+                        suspicious.add(f"{token} ← {n}")
+                except Exception as e:
+                    logger.warning(f"خطا در خواندن {n}: {e}")
+
+    if suspicious:
+        findings.append(("رشته‌های مشکوک", 20, "الگوهای حساس در محتوای APK دیده شد.", list(sorted(suspicious))[:12]))
+
+    if size > 250 * 1024 * 1024:
+        findings.append(("حجم غیرمعمول APK", 5, "APK بسیار بزرگ است.", [f"{size/1024/1024:.1f} MB"]))
+
+    # مرحله ۲: تحلیل AndroidManifest با androguard
+    if progress_callback:
+        progress_callback(40, "تحلیل AndroidManifest.xml...")
+    try:
+        manifest_data = extract_permissions_and_components(str(path))
+        dangerous = manifest_data.get('dangerous_permissions', [])
+        exported = manifest_data.get('exported_components', [])
+        perms.extend([(p, "dangerous", 8, "مجوز خطرناک") for p in dangerous])
+        if exported:
+            findings.append(("کامپوننت‌های exported", 15,
+                            f"{len(exported)} کامپوننت exported یافت شد.", [f"{typ}: {name}" for typ, name in exported[:10]]))
+        positives.append(f"بسته: {manifest_data.get('package_name', 'N/A')}")
+        positives.append(f"minSdk: {manifest_data.get('min_sdk', 'N/A')}")
+    except Exception as e:
+        logger.error(f"خطا در تحلیل مانیفست: {e}")
+        positives.append("تحلیل مانیفست با خطا مواجه شد.")
+
+    if perms:
+        total = min(45, sum(w for _,_,w,_ in perms))
+        findings.append(("مجوزهای حساس", total, "مجوزهای خطرناک شناسایی شد.", [p for p,_,_,_ in perms]))
+
+    # مرحله ۳: اسکن YARA
+    if progress_callback:
+        progress_callback(60, "اسکن YARA...")
+    yara_scanner = YaraScanner(rules_dir=CONFIG.get('yara_rules_dir', 'rules'))
+    yara_hits = yara_scanner.scan(str(path))
+    if yara_hits:
+        findings.append(("YARA", sum(10 for _ in yara_hits), "قوانین YARA فعال شدند.", [f"{h.rule} ({h.severity})" for h in yara_hits]))
+
+    # مرحله ۴: شبیه‌سازی Sandbox (اختیاری)
+    if progress_callback:
+        progress_callback(80, "شبیه‌سازی Sandbox...")
+    sandbox = SandboxAdapter(CONFIG.get('sandbox', {}))
+    sandbox_result = sandbox.submit(str(path))
+    if sandbox_result.verdict in ('malicious', 'suspicious'):
+        findings.append(("Sandbox پویا", 25 if sandbox_result.verdict == 'malicious' else 12,
+                         f"رفتار {sandbox_result.verdict} در شبیه‌سازی.", sandbox_result.events[:5]))
+
+    # محاسبه امتیاز نهایی
+    score = min(100, sum(x[1] for x in findings))
+    if score >= 80: level = "CRITICAL"
+    elif score >= 55: level = "HIGH"
+    elif score >= 30: level = "MEDIUM"
+    else: level = "LOW"
+    confidence = min(92, 55 + len(findings)*9)
+
+    summary = {
+        "file": str(path),
+        "file_size": size,
+        "sha256": sha,
+        "dex_count": len(classes),
+        "native_abis": sorted(native),
+        "permissions": perms,
+        "suspicious_strings": sorted(suspicious),
+        "findings": [{"title_fa": a, "weight": b, "detail_fa": c, "evidence": d} for a,b,c,d in findings],
+        "positives": positives,
+        "risk_score": score,
+        "risk_level": level,
+        "confidence": confidence,
+        "sandbox_verdict": sandbox_result.verdict,
+        "limitations": [
+            "تحلیل static/heuristic است و نیاز به تأیید پویا دارد.",
+            "برای تحلیل دقیق‌تر از aapt2 یا androguard استفاده شده است.",
+        ]
+    }
+    if progress_callback:
+        progress_callback(100, "تحلیل کامل شد.")
+    return summary
+
+# ========== رابط کاربری ==========
+class App(tk.Tk):
+    def __init__(self):
+        super().__init__()
+        self.title(APP)
+        self.geometry("1280x820")
+        self.minsize(1024, 700)
+        self.report = None
+        self.apk_path = None
+        self._build()
+        self._load_config()
+
+    def _load_config(self):
+        # بارگذاری کلیدهای API از محیط
+        self.vt_key = os.getenv("APZ_VT_API_KEY", "")
+        self.ha_key = os.getenv("APZ_HA_API_KEY", "")
+        self.md_key = os.getenv("APZ_MD_API_KEY", "")
+
+    def _build(self):
+        style = ttk.Style(self)
+        try: style.theme_use("vista")
+        except: pass
+
+        # نوار بالا
+        top = ttk.Frame(self, padding=12)
+        top.pack(fill="x")
+        ttk.Label(top, text="APZ Manager", font=("Segoe UI", 24, "bold")).pack(side="left")
+        ttk.Label(top, text="  Windows Security Suite", font=("Segoe UI", 11)).pack(side="left", pady=(10,0))
+
+        # نوار دکمه‌ها
+        buttons = ttk.Frame(self, padding=(12,0))
+        buttons.pack(fill="x")
+        ttk.Button(buttons, text="📂 انتخاب و تحلیل APK", command=self.pick).pack(side="left", padx=4)
+        ttk.Button(buttons, text="💾 ذخیره گزارش", command=self.save_report).pack(side="left", padx=4)
+        ttk.Button(buttons, text="🤖 AI Assistant", command=self.ask_ai).pack(side="left", padx=4)
+        ttk.Button(buttons, text="🔍 Reputation", command=self.multi_reputation).pack(side="left", padx=4)
+        ttk.Button(buttons, text="🌐 Threat Platform", command=self.threat_platform_scan).pack(side="left", padx=4)
+        ttk.Button(buttons, text="📊 گزارش HTML", command=self.export_html).pack(side="left", padx=4)
+
+        self.score = ttk.Label(buttons, text="Risk: —", font=("Segoe UI", 12, "bold"))
+        self.score.pack(side="right")
+
+        # Progress Bar
+        self.progress = ttk.Progressbar(self, orient="horizontal", length=400, mode="determinate")
+        self.progress.pack(fill="x", padx=12, pady=4)
+
+        # بدنه
+        body = ttk.PanedWindow(self, orient="horizontal")
+        body.pack(fill="both", expand=True, padx=12, pady=12)
+
+        left = ttk.Frame(body, padding=8)
+        right = ttk.Frame(body, padding=8)
+        body.add(left, weight=1); body.add(right, weight=2)
+
+        ttk.Label(left, text="یافته‌ها", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        self.tree = ttk.Treeview(left, columns=("weight","detail"), show="headings")
+        self.tree.heading("weight", text="وزن")
+        self.tree.heading("detail", text="عنوان")
+        self.tree.column("weight", width=60)
+        self.tree.column("detail", width=300)
+        self.tree.pack(fill="both", expand=True, pady=8)
+
+        ttk.Label(right, text="گزارش کامل", font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        self.text = scrolledtext.ScrolledText(right, wrap="word", font=("Segoe UI", 10))
+        self.text.pack(fill="both", expand=True)
+        self.text.insert("1.0", "یک APK انتخاب کنید تا تحلیل شروع شود.\n\nنسخه بهبودیافته با پشتیبانی از AndroidManifest و YARA.")
+
+        # نوار پایین
+        bottom = ttk.Frame(self, padding=(12,0,12,12))
+        bottom.pack(fill="x")
+        ttk.Label(bottom, text="AI Endpoint:").pack(side="left")
+        self.endpoint = ttk.Entry(bottom, width=35)
+        self.endpoint.insert(0, "https://api.openai.com/v1/chat/completions")
+        self.endpoint.pack(side="left", padx=5)
+        ttk.Label(bottom, text="Model:").pack(side="left")
+        self.model = ttk.Entry(bottom, width=16)
+        self.model.insert(0, "gpt-4.1-mini")
+        self.model.pack(side="left", padx=5)
+
+    def pick(self):
+        p = filedialog.askopenfilename(title="انتخاب APK", filetypes=[("Android APK","*.apk"),("All files","*.*")])
+        if not p: return
+        self.apk_path = p
+        self.text.delete("1.0","end")
+        self.text.insert("end", "🔍 در حال تحلیل…\n")
+        self.progress['value'] = 0
+        self.update_idletasks()
+
+        def worker():
+            try:
+                def update_progress(val, msg):
+                    self.after(0, lambda: self.progress.configure(value=val))
+                    self.after(0, lambda: self.text.insert("end", f"• {msg}\n"))
+                    self.after(0, self.update_idletasks)
+                self.report = analyze_apk(p, progress_callback=update_progress)
+                self.after(0, self.render)
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("خطا", str(e)))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def render(self):
+        r = self.report
+        self.score.config(text=f"Risk: {r['risk_score']}/100 • {r['risk_level']} • {r['confidence']}%")
+        for x in self.tree.get_children(): self.tree.delete(x)
+        for f in r["findings"]:
+            self.tree.insert("", "end", values=(f["weight"], f["title_fa"]))
+        self.text.delete("1.0","end")
+        self.text.insert("end", f"📊 امتیاز ریسک: {r['risk_score']}/100\nسطح: {r['risk_level']}\nاطمینان: {r['confidence']}%\n\n")
+        self.text.insert("end", f"SHA-256: {r['sha256']}\n")
+        self.text.insert("end", f"تعداد DEX: {r['dex_count']}\n")
+        self.text.insert("end", f" verdict Sandbox: {r.get('sandbox_verdict', 'N/A')}\n\n")
+        self.text.insert("end", "📌 یافته‌ها:\n")
+        for f in r["findings"]:
+            self.text.insert("end", f"\n[{f['weight']}] {f['title_fa']}\n{f['detail_fa']}\n")
+            for e in f["evidence"]:
+                self.text.insert("end", f"  • {e}\n")
+
+    def save_report(self):
+        if not self.report:
+            messagebox.showinfo("APZ", "ابتدا APK را تحلیل کنید.")
+            return
+        p = filedialog.asksaveasfilename(defaultextension=".json", initialfile="apz-report.json",
+                                         filetypes=[("JSON","*.json")])
+        if p:
+            Path(p).write_text(json.dumps(self.report, ensure_ascii=False, indent=2), encoding='utf-8')
+            messagebox.showinfo("APZ", "گزارش ذخیره شد.")
+
+    def export_html(self):
+        if not self.report:
+            messagebox.showinfo("APZ", "ابتدا APK را تحلیل کنید.")
+            return
+        p = filedialog.asksaveasfilename(defaultextension=".html", initialfile="apz-report.html",
+                                         filetypes=[("HTML","*.html")])
+        if p:
+            ReportGenerator.generate_html(self.report, p)
+            messagebox.showinfo("APZ", f"گزارش HTML در {p} ذخیره شد.")
+
+    def multi_reputation(self):
+        if not self.report:
+            messagebox.showinfo("Reputation", "ابتدا APK را تحلیل کنید.")
+            return
+        self.text.insert("end","\n🔍 بررسی اعتبارسنجی چندمنبعی...\n")
+        def work():
+            result = MultiReputationEngine().lookup(self.report["sha256"])
+            self.after(0, lambda: self._show_reputation(result))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_reputation(self, r):
+        self.text.insert("end", f"\n=== اعتبارسنجی ===\nوضعیت کلی: {r['overall_verdict']}\nاطمینان: {r['confidence']}%\n")
+        for p in r["providers"]:
+            self.text.insert("end", f"[{p['provider']}] {p['verdict']}\n")
+
+    def threat_platform_scan(self):
+        if not self.report or not self.apk_path:
+            messagebox.showinfo("Threat Platform", "ابتدا APK را تحلیل کنید.")
+            return
+        self.text.insert("end","\n🌐 اسکن Threat Platform...\n")
+        def work():
+            tp = ThreatPlatform(MultiReputationEngine())
+            result = tp.analyze(self.apk_path, self.report["sha256"])
+            self.after(0, lambda: self._show_threat(result))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _show_threat(self, r):
+        self.text.insert("end", f"IOC: {len(r.get('android_iocs', []))} | YARA: {len(r.get('yara_hits', []))} | MITRE: {len(r.get('mitre_attack', []))}\n")
+        for h in r.get('yara_hits', [])[:5]:
+            self.text.insert("end", f"YARA [{h['severity']}] {h['rule']}\n")
+
+    def ask_ai(self):
+        if not self.report:
+            messagebox.showinfo("AI", "ابتدا APK را تحلیل کنید.")
+            return
+        q = tk.simpledialog.askstring("AI Assistant", "سؤال خود را بنویسید:",
+                                      initialvalue="چرا این APK پرریسک است؟")
+        if not q: return
+        key = os.getenv("APZ_AI_API_KEY", "")
+        if not key:
+            self.text.insert("end", "\n\n🤖 AI محلی: کلید API تنظیم نشده است.")
+            return
+        def work():
+            try:
+                ans = self._ai_call(q)
+                self.after(0, lambda: self.text.insert("end", f"\n\n🤖 AI:\n{ans}\n"))
+            except Exception as e:
+                self.after(0, lambda: messagebox.showerror("AI", str(e)))
+        threading.Thread(target=work, daemon=True).start()
+
+    def _ai_call(self, question):
+        import urllib.request, json
+        endpoint = self.endpoint.get().strip()
+        model = self.model.get().strip()
+        key = os.getenv("APZ_AI_API_KEY", "")
+        prompt = {
+            "report": self.report,
+            "question": question,
+            "instruction": "بر اساس شواهد گزارش پاسخ بده و عدم قطعیت را ذکر کن."
+        }
+        payload = json.dumps({
+            "model": model,
+            "messages": [
+                {"role": "system", "content": "تو دستیار امنیت اندرویدی هستی. پاسخ فارسی."},
+                {"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}
+            ]
+        }).encode()
+        req = urllib.request.Request(endpoint, data=payload, headers={"Content-Type":"application/json", "Authorization":"Bearer "+key})
+        with urllib.request.urlopen(req, timeout=45) as resp:
+            obj = json.loads(resp.read().decode())
+            return obj["choices"][0]["message"]["content"]
+
+if __name__ == "__main__":
+    import tkinter.simpledialog
+    App().mainloop()

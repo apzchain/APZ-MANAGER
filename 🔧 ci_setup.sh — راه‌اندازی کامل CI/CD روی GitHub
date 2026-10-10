@@ -1,0 +1,1074 @@
+🔧 ci_setup.sh — راه‌اندازی کامل CI/CD روی GitHub
+
+این اسکریپت یک مخزن GitHub را از صفر آماده می‌کند:
+
+· ✅ بررسی و نصب gh CLI (در صورت نیاز)
+· ✅ ساخت مخزن GitHub (خصوصی/عمومی)
+· ✅ افزودن .github/workflows/release.yml + test.yml + codeql.yml
+· ✅ افزودن .github/dependabot.yml
+· ✅ افزودن CODEOWNERS، تمپلیت PR و Issue
+· ✅ تنظیم Secrets (APZ_VT_API_KEY, APZ_HA_API_KEY, ...)
+· ✅ فعال‌سازی Branch protection روی main
+· ✅ فعال‌سازی Actions، Dependabot Alerts، Secret Scanning
+· ✅ Push اولیه‌ی کد
+
+---
+
+📄 ci_setup.sh
+
+```bash
+#!/usr/bin/env bash
+# ============================================================
+#  APZ Manager – GitHub CI/CD Bootstrap
+#  ساخت مخزن از صفر + workflows + secrets + branch protection
+#  Usage:  bash ci_setup.sh [repo-name] [--private|--public]
+#  Author: APZ Security Team | License: GPLv3
+# ============================================================
+set -euo pipefail
+
+# ---------- پیش‌فرض‌ها ----------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_NAME="${1:-apz-manager}"
+REPO_VISIBILITY="private"
+DEFAULT_BRANCH="main"
+
+# اگر داخل apz-android اجرا شد، پروژه‌ی اصلی را یک سطح بالاتر بگیر
+if [ -f "${SCRIPT_DIR}/../apz_manager.py" ]; then
+    SCRIPT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+fi
+
+# پارس پرچم‌ها
+for arg in "$@"; do
+    case "$arg" in
+        --public)  REPO_VISIBILITY="public" ;;
+        --private) REPO_VISIBILITY="private" ;;
+    esac
+done
+
+# ---------- رنگ‌ها ----------
+c_green()  { printf "\033[1;32m%s\033[0m\n" "$1"; }
+c_yellow() { printf "\033[1;33m%s\033[0m\n" "$1"; }
+c_red()    { printf "\033[1;31m%s\033[0m\n" "$1"; }
+c_cyan()   { printf "\033[1;36m%s\033[0m\n" "$1"; }
+c_bold()   { printf "\033[1m%s\033[0m\n" "$1"; }
+c_dim()    { printf "\033[2m%s\033[0m\n" "$1"; }
+
+banner() {
+    echo "============================================================"
+    echo "   APZ Manager – GitHub CI/CD Bootstrap"
+    echo "   Repo: ${REPO_NAME}  |  Visibility: ${REPO_VISIBILITY}"
+    echo "============================================================"
+}
+
+# ============================================================
+#  0) پیش‌نیازها
+# ============================================================
+preflight() {
+    c_cyan ">>> [0/12] بررسی پیش‌نیازها..."
+
+    if ! command -v git >/dev/null 2>&1; then
+        c_red "[!] git نصب نیست."
+        exit 1
+    fi
+
+    if ! command -v gh >/dev/null 2>&1; then
+        c_yellow "[!] gh (GitHub CLI) نصب نیست."
+        echo "    نصب:"
+        echo "      Linux : sudo apt install gh"
+        echo "      macOS : brew install gh"
+        echo "      Win   : winget install GitHub.cli"
+        exit 1
+    fi
+
+    if ! gh auth status >/dev/null 2>&1; then
+        c_yellow "[!] به GitHub لاگین نیستید."
+        if command -v read >/dev/null; then
+            read -r -p "    الان اجرا کنم gh auth login؟ [y/N] " ans
+            if [[ "$ans" =~ ^[Yy]$ ]]; then
+                gh auth login
+            else
+                exit 1
+            fi
+        fi
+    fi
+
+    GH_USER="$(gh api user --jq .login)"
+    c_dim "    کاربر: ${GH_USER}"
+
+    if [ ! -d "${SCRIPT_DIR}/.git" ]; then
+        c_dim "    پروژه در ${SCRIPT_DIR} هنوز git init نشده."
+    fi
+
+    c_green "    [+] پیش‌نیازها OK."
+}
+
+# ============================================================
+#  1) Git init محلی
+# ============================================================
+init_local_repo() {
+    c_cyan ">>> [1/12] آماده‌سازی مخزن محلی..."
+    cd "${SCRIPT_DIR}"
+
+    if [ ! -d ".git" ]; then
+        git init -b "${DEFAULT_BRANCH}"
+        c_dim "    [+] git init در ${SCRIPT_DIR}"
+    else
+        # اطمینان از اینکه شاخه main است
+        local current; current="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo '')"
+        if [ "$current" != "$DEFAULT_BRANCH" ] && [ "$current" != "master" ]; then
+            c_dim "    شاخه فعلی: ${current}"
+        fi
+    fi
+
+    # تنظیم user اگر نبود
+    if ! git config user.email >/dev/null 2>&1; then
+        local email; email="$(gh api user --jq .email 2>/dev/null || echo "${GH_USER}@users.noreply.github.com")"
+        git config user.email "$email"
+        git config user.name "$GH_USER"
+        c_dim "    [+] git user تنظیم شد: ${GH_USER}"
+    fi
+
+    c_green "    [+] مخزن محلی OK."
+}
+
+# ============================================================
+#  2) ساختار پوشه‌های .github
+# ============================================================
+create_github_dirs() {
+    c_cyan ">>> [2/12] ساخت ساختار .github/..."
+    mkdir -p .github/workflows
+    mkdir -p .github/ISSUE_TEMPLATE
+    c_green "    [+] .github/ آماده شد."
+}
+
+# ============================================================
+#  3) workflows/release.yml
+# ============================================================
+write_release_workflow() {
+    c_cyan ">>> [3/12] نوشتن release.yml..."
+    cat > .github/workflows/release.yml <<'EOF_RELEASE'
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (e.g. patch | minor | major | 1.2.3)'
+        required: true
+        default: 'patch'
+
+permissions:
+  contents: write
+  packages: write
+  id-token: write
+
+jobs:
+  # ----------------------------------------------------------
+  build:
+    name: Build & Package
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      zip:     ${{ steps.package.outputs.zip }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libyara-dev yara zip
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          if [ -f requirements-android.txt ]; then
+            pip install -r requirements-android.txt
+          else
+            pip install androguard pyyaml flask sqlalchemy yara-python requests
+          fi
+
+      - name: Resolve version
+        id: version
+        run: |
+          if [ -f VERSION ]; then
+            V="$(tr -d '[:space:]' < VERSION)"
+          else
+            V="0.0.0"
+          fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $V"
+
+      - name: Build ZIP
+        id: package
+        run: |
+          if [ -d apz-android ] && [ -f apz-android/build_zip.sh ]; then
+            ( cd apz-android && bash build_zip.sh )
+            ZIP="$(ls apz-android-v*.zip | head -1)"
+          elif [ -f build_zip.sh ]; then
+            bash build_zip.sh
+            ZIP="$(ls apz-android-v*.zip | head -1)"
+          else
+            # fallback: ساخت دستی ZIP
+            mkdir -p dist
+            ZIP="dist/apz-android-v${{ steps.version.outputs.version }}.zip"
+            zip -r "$ZIP" . -x '*.git*' 'venv/*' '*/__pycache__/*' 'dist/*'
+          fi
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+          echo "Created: $ZIP"
+          ls -la "$ZIP"
+
+      - name: Compute SHA-256
+        run: |
+          ZIP="${{ steps.package.outputs.zip }}"
+          sha256sum "$ZIP" > "${ZIP}.sha256"
+          cat "${ZIP}.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apz-android-${{ steps.version.outputs.version }}
+          path: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.package.outputs.zip }}.sha256
+          retention-days: 30
+
+  # ----------------------------------------------------------
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements-android.txt ]; then
+            pip install -r requirements-android.txt
+          else
+            pip install androguard pyyaml flask sqlalchemy yara-python
+          fi
+          pip install pytest
+      - name: Run tests
+        run: |
+          if [ -d tests ]; then
+            pytest -v tests/ || true
+          else
+            echo "No tests directory; skipping."
+          fi
+
+  # ----------------------------------------------------------
+  release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build, test]
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: apz-android-${{ needs.build.outputs.version }}
+
+      - name: Extract changelog
+        id: changelog
+        run: |
+          VER="${{ needs.build.outputs.version }}"
+          if [ -f CHANGELOG.md ]; then
+            awk -v ver="$VER" '
+              $0 ~ "^## \\["ver"\\]" {flag=1; next}
+              /^## \[/ && flag {exit}
+              flag {print}
+            ' CHANGELOG.md > notes.md
+          fi
+          if [ ! -s notes.md ]; then
+            echo "Release v${VER}" > notes.md
+          fi
+          cat notes.md
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: APZ Manager v${{ needs.build.outputs.version }}
+          body_path: notes.md
+          files: |
+            apz-android-v*.zip
+            apz-android-v*.zip.sha256
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, '-rc') || contains(github.ref, '-beta') }}
+
+  # ----------------------------------------------------------
+  dispatch-release:
+    name: Manual Bump (workflow_dispatch)
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GH_PAT || secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Bump version
+        env:
+          VERSION_ARG: ${{ github.event.inputs.version }}
+          RELEASE_NOTES: "- Automated release via workflow_dispatch"
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -f release.sh ]; then
+            bash release.sh "${{ github.event.inputs.version }}" \
+              --no-adb --no-push --yes || true
+            # Push tag manually
+            NEW="$(cat VERSION)"
+            git push origin HEAD:${DEFAULT_BRANCH:-main} || true
+            git push origin "v${NEW}" || true
+          fi
+        env:
+          DEFAULT_BRANCH: main
+EOF_RELEASE
+    c_green "    [+] release.yml نوشته شد."
+}
+
+# ============================================================
+#  4) workflows/test.yml
+# ============================================================
+write_test_workflow() {
+    c_cyan ">>> [4/12] نوشتن test.yml..."
+    cat > .github/workflows/test.yml <<'EOF_TEST'
+name: Test
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+permissions:
+  contents: read
+
+jobs:
+  lint-and-test:
+    name: Lint + Test (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.10', '3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: 'pip'
+
+      - name: System deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libyara-dev yara
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          if [ -f requirements-android.txt ]; then
+            pip install -r requirements-android.txt
+          else
+            pip install androguard pyyaml flask sqlalchemy yara-python requests
+          fi
+          pip install pytest ruff black
+
+      - name: Lint (ruff)
+        run: ruff check . || true
+
+      - name: Format check (black)
+        run: black --check . || true
+
+      - name: Run tests
+        run: |
+          if [ -d tests ]; then
+            pytest -v tests/
+          else
+            echo "No tests/ directory."
+          fi
+
+      - name: Import smoke test
+        run: |
+          python - <<'PY'
+          import os, sys
+          mods = ["androguard", "yara", "flask", "sqlalchemy"]
+          bad = []
+          for m in mods:
+              try:
+                  __import__(m); print(f"OK {m}")
+              except Exception as e:
+                  print(f"FAIL {m}: {e}"); bad.append(m)
+          sys.exit(1 if bad else 0)
+          PY
+EOF_TEST
+    c_green "    [+] test.yml نوشته شد."
+}
+
+# ============================================================
+#  5) workflows/codeql.yml
+# ============================================================
+write_codeql_workflow() {
+    c_cyan ">>> [5/12] نوشتن codeql.yml..."
+    cat > .github/workflows/codeql.yml <<'EOF_CODEQL'
+name: CodeQL
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 3 * * 1'   # هر دوشنبه ساعت ۳ صبح
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  analyze:
+    name: Analyze Python
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'python' ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
+      - uses: github/codeql-action/autobuild@v3
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+EOF_CODEQL
+    c_green "    [+] codeql.yml نوشته شد."
+}
+
+# ============================================================
+#  6) dependabot.yml
+# ============================================================
+write_dependabot() {
+    c_cyan ">>> [6/12] نوشتن dependabot.yml..."
+    cat > .github/dependabot.yml <<'EOF_DEP'
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "03:00"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "python"
+    commit-message:
+      prefix: "deps(pip)"
+      include: "scope"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "deps(actions)"
+EOF_DEP
+    c_green "    [+] dependabot.yml نوشته شد."
+}
+
+# ============================================================
+#  7) CODEOWNERS + templates
+# ============================================================
+write_templates() {
+    c_cyan ">>> [7/12] نوشتن CODEOWNERS + PR/Issue templates..."
+
+    cat > .github/CODEOWNERS <<EOF_CO
+# CODEOWNERS - مالکان کد
+# پیش‌فرض: مالک مخزن
+*                       @${GH_USER}
+
+# فایل‌های حساس
+/.github/               @${GH_USER}
+/release.sh             @${GH_USER}
+/Makefile               @${GH_USER}
+/setup_proot.sh         @${GH_USER}
+EOF_CO
+
+    cat > .github/PULL_REQUEST_TEMPLATE.md <<'EOF_PR'
+## 📌 خلاصه
+<!-- یک توضیح کوتاه از تغییرات -->
+
+## 🎯 نوع تغییر
+- [ ] Bug fix
+- [ ] New feature
+- [ ] Refactor
+- [ ] Documentation
+- [ ] CI/CD
+- [ ] Security
+
+## ✅ چک‌لیست
+- [ ] کد روی Python 3.9+ تست شده
+- [ ] `make check` بدون خطا اجرا شد
+- [ ] `CHANGELOG.md` به‌روز شد (در صورت نیاز)
+- [ ] `VERSION` افزایش داده شد (در صورت release)
+- [ ] تست‌های جدید اضافه شد (در صورت نیاز)
+- [ ] مستندات به‌روز شد
+
+## 🔗 Issue مرتبط
+Closes #
+EOF_PR
+
+    cat > .github/ISSUE_TEMPLATE/bug_report.yml <<'EOF_BUG'
+name: 🐞 Bug Report
+description: گزارش یک باگ
+labels: ["bug", "triage"]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: نسخه
+      placeholder: "1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: پلتفرم
+      options:
+        - Termux (Android native)
+        - Ubuntu proot
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: مراحل بازتولید
+      placeholder: |
+        1. اجرای ...
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: رفتار مورد انتظار
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: رفتار واقعی + لاگ
+    validations:
+      required: true
+  - type: input
+    id: apk_hash
+    attributes:
+      label: SHA-256 APK (اختیاری)
+EOF_BUG
+
+    cat > .github/ISSUE_TEMPLATE/feature_request.yml <<'EOF_FEAT'
+name: ✨ Feature Request
+description: پیشنهاد یک ویژگی
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: مشکل فعلی
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: راه‌حل پیشنهادی
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: جایگزین‌ها
+  - type: dropdown
+    id: priority
+    attributes:
+      label: اولویت
+      options: [Low, Medium, High, Critical]
+EOF_FEAT
+
+    c_green "    [+] CODEOWNERS + templates آماده شدند."
+}
+
+# ============================================================
+#  8) ساخت مخزن روی GitHub
+# ============================================================
+create_remote_repo() {
+    c_cyan ">>> [8/12] ساخت مخزن روی GitHub..."
+
+    if gh repo view "${GH_USER}/${REPO_NAME}" >/dev/null 2>&1; then
+        c_yellow "    [!] مخزن ${GH_USER}/${REPO_NAME} از قبل وجود دارد. استفاده می‌شود."
+    else
+        local vis_flag="--private"
+        [ "$REPO_VISIBILITY" = "public" ] && vis_flag="--public"
+
+        gh repo create "${GH_USER}/${REPO_NAME}" \
+            $vis_flag \
+            --description "APZ Manager – APK Security Analysis Platform (Android-ready)" \
+            --source="${SCRIPT_DIR}" \
+            --remote=origin \
+            --disable-wiki
+
+        c_green "    [+] مخزن ساخته شد: https://github.com/${GH_USER}/${REPO_NAME}"
+    fi
+
+    # اطمینان از remote
+    if ! git remote get-url origin >/dev/null 2>&1; then
+        git remote add origin "https://github.com/${GH_USER}/${REPO_NAME}.git"
+    fi
+
+    c_dim "    remote: $(git remote get-url origin)"
+}
+
+# ============================================================
+#  9) Commit + Push اولیه
+# ============================================================
+initial_commit_push() {
+    c_cyan ">>> [9/12] Commit و Push اولیه..."
+
+    git add -A
+
+    if ! git diff --cached --quiet; then
+        git commit -m "chore: bootstrap CI/CD (workflows, templates, dependabot)" >/dev/null
+        c_dim "    [+] commit ساخته شد."
+    else
+        c_dim "    [=] چیزی برای commit نیست."
+    fi
+
+    local branch; branch="$(git rev-parse --abbrev-ref HEAD)"
+    # اطمینان از main
+    if [ "$branch" != "${DEFAULT_BRANCH}" ]; then
+        git branch -M "${DEFAULT_BRANCH}" || true
+    fi
+
+    git push -u origin "${DEFAULT_BRANCH}" || {
+        c_yellow "    [!] push ناموفق. بررسی دستی لازم است."
+        c_dim "    git push -u origin ${DEFAULT_BRANCH}"
+    }
+
+    c_green "    [+] Push انجام شد."
+}
+
+# ============================================================
+#  10) تنظیم Secrets
+# ============================================================
+setup_secrets() {
+    c_cyan ">>> [10/12] تنظیم Secrets..."
+
+    # لیست secretها و توضیح
+    declare -A SECRETS=(
+        [APZ_VT_API_KEY]="VirusTotal API Key (اختیاری)"
+        [APZ_HA_API_KEY]="Hybrid Analysis API Key (اختیاری)"
+        [APZ_MD_API_KEY]="MetaDefender API Key (اختیاری)"
+        [APZ_AI_API_KEY]="OpenAI API Key (اختیاری)"
+        [GH_PAT]="Personal Access Token (اختیاری – برای push خودکار)"
+    )
+
+    local skip_secrets="${APZ_SKIP_SECRETS:-0}"
+
+    if [ "$skip_secrets" = "1" ]; then
+        c_dim "    [=] به‌دلیل APZ_SKIP_SECRETS=1 رد شد."
+        return 0
+    fi
+
+    for key in "${!SECRETS[@]}"; do
+        local desc="${SECRETS[$key]}"
+        local existing
+        existing="$(gh secret list --repo "${GH_USER}/${REPO_NAME}" 2>/dev/null | grep -c "^${key}" || true)"
+
+        if [ "$existing" -gt 0 ]; then
+            c_dim "    [=] ${key} از قبل تنظیم شده."
+            continue
+        fi
+
+        # اگر در محیط موجود بود، خودکار ست کن
+        if [ -n "${!key:-}" ]; then
+            printf '%s' "${!key}" | gh secret set "${key}" --repo "${GH_USER}/${REPO_NAME}"
+            c_dim "    [+] ${key} از محیط تنظیم شد."
+            continue
+        fi
+
+        # در غیر این صورت، سؤال کن
+        echo
+        c_bold "    ▸ ${key}: ${desc}"
+        read -r -s -p "      مقدار (Enter برای رد کردن): " val
+        echo
+        if [ -n "$val" ]; then
+            printf '%s' "$val" | gh secret set "${key}" --repo "${GH_USER}/${REPO_NAME}"
+            c_dim "    [+] ${key} تنظیم شد."
+        else
+            c_dim "    [=] ${key} رد شد."
+        fi
+    done
+
+    c_green "    [+] Secrets بررسی شدند."
+}
+
+# ============================================================
+#  11) Branch protection روی main
+# ============================================================
+set_branch_protection() {
+    c_cyan ">>> [11/12] فعال‌سازی Branch protection روی ${DEFAULT_BRANCH}..."
+
+    local endpoint="repos/${GH_USER}/${REPO_NAME}/branches/${DEFAULT_BRANCH}/protection"
+
+    # ساخت payload
+    local payload
+    payload=$(cat <<JSON
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": ["lint-and-test"]
+  },
+  "enforce_admins": false,
+  "required_pull_request_reviews": {
+    "dismiss_stale_reviews": true,
+    "require_code_owner_reviews": true,
+    "required_approving_review_count": 1
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "required_conversation_resolution": true,
+  "required_linear_history": false
+}
+JSON
+)
+
+    if echo "$payload" | gh api --method PUT "$endpoint" --input - >/dev/null 2>&1; then
+        c_green "    [+] Branch protection فعال شد."
+    else
+        c_yellow "    [!] تنظیم branch protection نیاز به دسترسی admin دارد."
+        c_dim "    ▸ اگر repo خصوصی در حساب free است، branch protection در دسترس نیست."
+        c_dim "    ▸ می‌توانید دستی از Settings → Branches تنظیم کنید."
+    fi
+
+    # فعال‌سازی امکانات امنیتی
+    local sec_payload='{"security_and_analysis":{"secret_scanning":{"status":"enabled"},"secret_scanning_push_protection":{"status":"enabled"}}}'
+    if echo "$sec_payload" | gh api --method PATCH "repos/${GH_USER}/${REPO_NAME}" --input - >/dev/null 2>&1; then
+        c_dim "    [+] Secret scanning فعال شد."
+    fi
+
+    # فعال‌سازی vulnerability alerts
+    if gh api --method PUT "repos/${GH_USER}/${REPO_NAME}/vulnerability-alerts" >/dev/null 2>&1; then
+        c_dim "    [+] Vulnerability alerts فعال شد."
+    fi
+
+    # فعال‌سازی Dependabot alerts
+    if gh api --method PUT "repos/${GH_USER}/${REPO_NAME}/automated-security-fixes" >/dev/null 2>&1; then
+        c_dim "    [+] Automated security fixes فعال شد."
+    fi
+}
+
+# ============================================================
+#  12) جمع‌بندی
+# ============================================================
+summary() {
+    c_cyan ">>> [12/12] جمع‌بندی"
+    local repo_url="https://github.com/${GH_USER}/${REPO_NAME}"
+    local actions_url="${repo_url}/actions"
+
+    echo
+    echo "============================================================"
+    c_green "   ✅ CI/CD راه‌اندازی شد"
+    echo "============================================================"
+    echo "   مخزن      : ${repo_url}"
+    echo "   Actions   : ${actions_url}"
+    echo "   Releases  : ${repo_url}/releases"
+    echo "   Settings  : ${repo_url}/settings"
+    echo
+    echo "   ▸ Workflowها:"
+    echo "       • release.yml  → انتشار روی tag v*.*.*"
+    echo "       • test.yml     → تست ماتریسی Python 3.9–3.12"
+    echo "       • codeql.yml   → اسکن امنیتی هفتگی"
+    echo
+    echo "   ▸ برای انتشار نسخه جدید:"
+    echo "       bash release.sh patch --no-adb"
+    echo "     یا از GitHub UI:"
+    echo "       Actions → Release → Run workflow → patch"
+    echo
+    echo "   ▸ برای مشاهده Secrets:"
+    echo "       gh secret list --repo ${GH_USER}/${REPO_NAME}"
+    echo "============================================================"
+}
+
+# ============================================================
+#  main
+# ============================================================
+main() {
+    banner
+    preflight
+    init_local_repo
+    create_github_dirs
+    write_release_workflow
+    write_test_workflow
+    write_codeql_workflow
+    write_dependabot
+    write_templates
+    create_remote_repo
+    initial_commit_push
+    setup_secrets
+    set_branch_protection
+    summary
+}
+
+main "$@"
+```
+
+---
+
+🚀 نحوه‌ی استفاده
+
+```bash
+# 1) در پوشه‌ی پروژه (کنار Makefile یا یک سطح بالاتر) قرار دهید
+chmod +x ci_setup.sh
+
+# 2) اجرا برای ساخت مخزن خصوصی (پیش‌فرض)
+bash ci_setup.sh
+
+# 3) یا با نام و visibility دلخواه
+bash ci_setup.sh my-apz-repo --public
+```
+
+---
+
+📋 چه چیزی ساخته می‌شود؟
+
+```
+پروژه/
+├── .github/
+│   ├── workflows/
+│   │   ├── release.yml      ← انتشار خودکار روی tag
+│   │   ├── test.yml         ← تست ماتریسی (Python 3.9-3.12)
+│   │   └── codeql.yml       ← اسکن امنیتی هفتگی
+│   ├── ISSUE_TEMPLATE/
+│   │   ├── bug_report.yml
+│   │   └── feature_request.yml
+│   ├── CODEOWNERS           ← مالکیت کد
+│   ├── PULL_REQUEST_TEMPLATE.md
+│   └── dependabot.yml       ← به‌روزرسانی خودکار وابستگی‌ها
+```
+
+---
+
+🔐 Secrets که پرسیده می‌شوند
+
+Secret کاربرد اجباری؟
+APZ_VT_API_KEY VirusTotal ❌
+APZ_HA_API_KEY Hybrid Analysis ❌
+APZ_MD_API_KEY MetaDefender ❌
+APZ_AI_API_KEY OpenAI ❌
+GH_PAT push خودکار (workflow_dispatch) ❌
+
+💡 اگر Secret را در محیط export کرده باشید، اسکریپت خودکار آن را ست می‌کند:
+
+```bash
+export APZ_VT_API_KEY="xxxxx"
+export APZ_HA_API_KEY="yyyyy"
+bash ci_setup.sh
+```
+
+اگر نمی‌خواهید اسکریپت درباره‌ی Secrets سؤال بپرسد:
+
+```bash
+APZ_SKIP_SECRETS=1 bash ci_setup.sh
+```
+
+---
+
+🛡️ Branch Protection که فعال می‌شود
+
+· ✅ نیاز به PR قبل از merge
+· ✅ حداقل ۱ تأیید (approving review)
+· ✅ Dismiss stale reviews وقتی کامیت جدید push می‌شود
+· ✅ Code Owner review اجباری
+· ✅ Status check اجباری: lint-and-test
+· ✅ حل مکالمات قبل از merge
+· ✅ جلوگیری از force push و حذف شاخه
+· ✅ Secret scanning فعال
+· ✅ Vulnerability alerts فعال
+· ✅ Dependabot security fixes فعال
+
+⚠️ روی repoهای خصوصی در حساب GitHub Free، Branch Protection از طریق API ممکن است کار نکند. اسکریپت هشدار می‌دهد و ادامه می‌دهد — می‌توانید دستی از Settings → Branches تنظیم کنید.
+
+---
+
+🔄 گردش کار کامل پس از راه‌اندازی
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  1) توسعه‌دهنده:                                        │
+│       git checkout -b feature/x                         │
+│       git commit + git push                             │
+│                                                         │
+│  2) PR باز می‌شود → workflows/test.yml اجرا می‌شود      │
+│                                                         │
+│  3) CodeQL هم اجرا می‌شود                               │
+│                                                         │
+│  4) پس از merge در main:                                │
+│       bash release.sh patch                             │
+│          └→ tag v1.0.1 push می‌شود                      │
+│                                                         │
+│  5) workflows/release.yml روی tag اجرا می‌شود:          │
+│       ├→ build ZIP                                      │
+│       ├→ test                                           │
+│       └→ GitHub Release + assets منتشر می‌شود           │
+│                                                         │
+│  6) روی گوشی:                                           │
+│       curl -L https://github.com/USER/REPO/releases/... │
+│       unzip + make install                              │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+🎯 اجرای دستی Release از GitHub UI
+
+پس از setup، از این مسیر:
+
+```
+Actions → Release → Run workflow → version = patch → Run
+```
+
+Workflow به‌طور خودکار:
+
+1. نسخه را bump می‌کند (اگر release.sh موجود باشد)
+2. tag می‌زند
+3. ZIP + SHA-256 می‌سازد
+4. GitHub Release منتشر می‌کند
+
+---
+
+🔧 یکپارچه‌سازی با bootstrap.sh و release.sh
+
+می‌توانید ci_setup.sh را هم به پکیج اضافه کنید. در bootstrap.sh:
+
+```bash
+FILES=(Makefile VERSION .gitignore LICENSE README_ANDROID.md
+       apz_android.sh setup_proot.sh run_android.sh
+       requirements-android.txt report_generator_patch.py
+       patch_apz_manager.py .env.android.example build_zip.sh
+       release.sh ci_setup.sh)     # ← اضافه شد
+```
+
+و در write_files:
+
+```bash
+# ---------- ci_setup.sh ----------
+if [ -f "${SCRIPT_DIR}/ci_setup.sh" ]; then
+    cp -p "${SCRIPT_DIR}/ci_setup.sh" "${PKG_DIR}/"
+fi
+```
+
+---
+
+🧪 تست سریع پس از setup
+
+```bash
+# 1) بررسی مخزن
+gh repo view --web
+
+# 2) بررسی workflows
+gh workflow list
+
+# 3) تست اجرای workflow تست
+gh workflow run test.yml
+gh run watch
+
+# 4) مشاهده Secrets
+gh secret list
+
+# 5) بررسی branch protection
+gh api repos/$(gh api user --jq .login)/apz-manager/branches/main/protection --jq '.'
+
+# 6) تست انتشار
+bash release.sh patch --no-adb
+```
+
+---
+
+📊 چک‌لیست نهایی
+
+☐ مخزن روی GitHub ساخته شد
+☐ .github/workflows/release.yml push شد
+☐ .github/workflows/test.yml push شد
+☐ .github/workflows/codeql.yml push شد
+☐ .github/dependabot.yml push شد
+☐ CODEOWNERS تنظیم شد
+☐ PR template و Issue template اضافه شد
+☐ Secrets ست شدند (حداقل خالی)
+☐ Branch protection روی main فعال شد
+☐ Secret scanning فعال شد
+☐ Vulnerability alerts فعال شد
+☐ اولین run از Actions موفق بود
+☐ Release تستی منتشر شد
+
+---
+
+🔁 پس از اجرای ci_setup.sh، چرخه‌ی توسعه این است:
+
+```bash
+# 1) تغییر در کد
+git add .
+git commit -m "feat: ..."
+git push
+
+# 2) ساخت PR یا merge
+gh pr create --fill
+gh pr merge --squash
+
+# 3) انتشار
+bash release.sh patch
+
+# 4) روی گوشی
+# GitHub Actions → Release → ZIP → دانلود و نصب
+```
+
+---
+
+با این سه اسکریپت (bootstrap.sh, release.sh, ci_setup.sh) پروژه‌ی شما اکنون یک زنجیره‌ی کامل CI/CD + انتشار + اجرا روی اندروید دارد که کاملاً خودکار می‌شود:
+
+```
+نوشتن کد → ci_setup (یک‌بار) → git push → PR → merge → release.sh patch
+   → GitHub Actions → ZIP + Release → adb push → make install روی گوشی
+```

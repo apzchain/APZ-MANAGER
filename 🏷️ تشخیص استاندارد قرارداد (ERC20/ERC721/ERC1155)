@@ -1,0 +1,1362 @@
+
+---
+
+📁 ساختار فایل‌های جدید
+
+```
+docs/
+├── assets/
+│   ├── css/
+│   │   └── standards.css             # ✨ جدید
+│   └── js/
+│       └── standard-detector.js      # ✨ جدید
+└── explorer.html                     # 🔄 به‌روزرسانی می‌شود
+```
+
+---
+
+1️⃣ docs/assets/js/standard-detector.js
+
+```javascript
+/* ═══════════════════════════════════════════════
+   APZ Wallet — Smart Contract Standard Detector
+   Detects: ERC20, ERC721, ERC1155, ERC165, ERC2981,
+            ERC4626, ERC20Permit, Ownable, AccessControl,
+            Pausable, Proxy (EIP-1967/EIP-1822), Multicall
+   Methods:
+     1. ABI heuristic (function signatures + events)
+     2. ERC165 supportsInterface (on-chain, optional)
+     3. Proxy storage slot detection
+   ═══════════════════════════════════════════════ */
+
+(function () {
+  'use strict';
+
+  const RPC = window.APZ_RPC;
+
+  // ─── ERC165 Interface IDs ───
+  const INTERFACE_IDS = {
+    ERC165: '0x01ffc9a7',
+    ERC721: '0x80ac58cd',
+    ERC721Metadata: '0x5b5e139f',
+    ERC721Enumerable: '0x780e9d63',
+    ERC1155: '0xd9b67a26',
+    ERC1155MetadataURI: '0x0e89341c',
+    ERC2981: '0x2a55205a',
+    ERC20: null, // ERC20 از ERC165 پشتیبانی نمی‌کند
+    ERC20Permit: null,
+    ERC4626: null,
+    Ownable: null,
+    AccessControl: null,
+    Pausable: null
+  };
+
+  // ─── Standard Definitions ───
+  const STANDARDS = [
+    {
+      id: 'ERC20',
+      name: 'ERC-20',
+      fullName: 'Fungible Token',
+      color: 'erc20',
+      icon: '🪙',
+      required: [
+        'transfer(address,uint256)',
+        'transferFrom(address,address,uint256)',
+        'approve(address,uint256)',
+        'balanceOf(address)',
+        'totalSupply()',
+        'allowance(address,address)'
+      ],
+      events: [
+        'Transfer(address,address,uint256)',
+        'Approval(address,address,uint256)'
+      ]
+    },
+    {
+      id: 'ERC20Metadata',
+      name: 'ERC-20 Metadata',
+      fullName: 'With name/symbol/decimals',
+      color: 'erc20meta',
+      icon: '📋',
+      parent: 'ERC20',
+      required: [
+        'name()',
+        'symbol()',
+        'decimals()'
+      ]
+    },
+    {
+      id: 'ERC20Permit',
+      name: 'ERC-20 Permit',
+      fullName: 'EIP-2612 Gasless Approvals',
+      color: 'permit',
+      icon: '⚡',
+      parent: 'ERC20',
+      required: [
+        'permit(address,address,uint256,uint256,uint8,bytes32,bytes32)',
+        'nonces(address)',
+        'DOMAIN_SEPARATOR()'
+      ]
+    },
+    {
+      id: 'ERC721',
+      name: 'ERC-721',
+      fullName: 'Non-Fungible Token',
+      color: 'erc721',
+      icon: '🖼️',
+      required: [
+        'ownerOf(uint256)',
+        'balanceOf(address)',
+        'transferFrom(address,address,uint256)',
+        'safeTransferFrom(address,address,uint256)',
+        'approve(address,uint256)',
+        'getApproved(uint256)',
+        'setApprovalForAll(address,bool)',
+        'isApprovedForAll(address,address)'
+      ],
+      events: [
+        'Transfer(address,address,uint256)',
+        'Approval(address,address,uint256)',
+        'ApprovalForAll(address,address,bool)'
+      ],
+      interfaceId: 'ERC721'
+    },
+    {
+      id: 'ERC721Metadata',
+      name: 'ERC-721 Metadata',
+      fullName: 'With name/symbol/tokenURI',
+      color: 'erc721meta',
+      icon: '📋',
+      parent: 'ERC721',
+      required: ['name()', 'symbol()', 'tokenURI(uint256)'],
+      interfaceId: 'ERC721Metadata'
+    },
+    {
+      id: 'ERC721Enumerable',
+      name: 'ERC-721 Enumerable',
+      fullName: 'Enumerable NFTs',
+      color: 'erc721enum',
+      icon: '📚',
+      parent: 'ERC721',
+      required: ['totalSupply()', 'tokenByIndex(uint256)', 'tokenOfOwnerByIndex(address,uint256)'],
+      interfaceId: 'ERC721Enumerable'
+    },
+    {
+      id: 'ERC1155',
+      name: 'ERC-1155',
+      fullName: 'Multi-Token Standard',
+      color: 'erc1155',
+      icon: '🎨',
+      required: [
+        'balanceOf(address,uint256)',
+        'balanceOfBatch(address[],uint256[])',
+        'setApprovalForAll(address,bool)',
+        'isApprovedForAll(address,address)',
+        'safeTransferFrom(address,address,uint256,uint256,bytes)',
+        'safeBatchTransferFrom(address,address,uint256[],uint256[],bytes)'
+      ],
+      events: [
+        'TransferSingle(address,address,address,uint256,uint256)',
+        'TransferBatch(address,address,address,uint256[],uint256[])',
+        'ApprovalForAll(address,address,bool)',
+        'URI(string,uint256)'
+      ],
+      interfaceId: 'ERC1155'
+    },
+    {
+      id: 'ERC165',
+      name: 'ERC-165',
+      fullName: 'Interface Detection',
+      color: 'erc165',
+      icon: '🔍',
+      required: ['supportsInterface(bytes4)'],
+      interfaceId: 'ERC165'
+    },
+    {
+      id: 'ERC2981',
+      name: 'ERC-2981',
+      fullName: 'NFT Royalty',
+      color: 'erc2981',
+      icon: '💎',
+      required: ['royaltyInfo(uint256,uint256)'],
+      interfaceId: 'ERC2981'
+    },
+    {
+      id: 'ERC4626',
+      name: 'ERC-4626',
+      fullName: 'Tokenized Vault',
+      color: 'erc4626',
+      icon: '🏦',
+      required: [
+        'asset()',
+        'totalAssets()',
+        'deposit(uint256,address)',
+        'mint(uint256,address)',
+        'withdraw(uint256,address,address)',
+        'redeem(uint256,address,address)',
+        'convertToShares(uint256)',
+        'convertToAssets(uint256)',
+        'previewDeposit(uint256)',
+        'previewMint(uint256)',
+        'previewWithdraw(uint256)',
+        'previewRedeem(uint256)'
+      ]
+    },
+    {
+      id: 'Ownable',
+      name: 'Ownable',
+      fullName: 'Single Owner Pattern',
+      color: 'ownable',
+      icon: '👑',
+      required: ['owner()', 'transferOwnership(address)', 'renounceOwnership()'],
+      events: ['OwnershipTransferred(address,address)']
+    },
+    {
+      id: 'AccessControl',
+      name: 'Access Control',
+      fullName: 'Role-Based Access',
+      color: 'access',
+      icon: '🔐',
+      required: [
+        'hasRole(bytes32,address)',
+        'grantRole(bytes32,address)',
+        'revokeRole(bytes32,address)',
+        'renounceRole(bytes32,address)',
+        'getRoleAdmin(bytes32)'
+      ],
+      events: ['RoleGranted(bytes32,address,address)', 'RoleRevoked(bytes32,address,address)']
+    },
+    {
+      id: 'Pausable',
+      name: 'Pausable',
+      fullName: 'Emergency Stop',
+      color: 'pausable',
+      icon: '⏸️',
+      required: ['paused()', 'pause()', 'unpause()'],
+      events: ['Paused(address)', 'Unpaused(address)']
+    },
+    {
+      id: 'Multicall',
+      name: 'Multicall',
+      fullName: 'Batch Calls',
+      color: 'multicall',
+      icon: '📦',
+      required: ['multicall(bytes[])']
+    }
+  ];
+
+  // ─── Proxy Storage Slots ───
+  const PROXY_SLOTS = {
+    // EIP-1967: Implementation
+    'eip1967-impl': '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d382bbc',
+    // EIP-1967: Beacon
+    'eip1967-beacon': '0xa3f0ad74e5423aebfd80d3ef4346578335a9a72aeaee59ff6cb3582b35133d50',
+    // EIP-1967: Admin
+    'eip1967-admin': '0xb53127684a568b3173ae13b9f8a6016e243e63b6e8ee1178d6a717850b5d6103',
+    // EIP-1822: Proxiable UUID
+    'eip1822': '0xc5f16f0fcc639fa48a6947836d9850f504798523bf8c9a3a87d5876cf622bcf7'
+  };
+
+  // ─── Build ABI Signature Set ───
+  function buildSignatureSet(abi) {
+    const fns = new Set();
+    const events = new Set();
+    const errors = new Set();
+
+    for (const item of abi || []) {
+      const inputs = (item.inputs || []).map((i) => i.type).join(',');
+      const sig = `${item.name}(${inputs})`;
+
+      if (item.type === 'function') fns.add(sig);
+      else if (item.type === 'event') events.add(sig);
+      else if (item.type === 'error') errors.add(sig);
+    }
+
+    return { fns, events, errors };
+  }
+
+  // ─── Check Required ───
+  function hasAll(required, set) {
+    if (!required || required.length === 0) return true;
+    return required.every((r) => set.has(r));
+  }
+
+  function hasAny(required, set) {
+    return required.some((r) => set.has(r));
+  }
+
+  // ─── Detect by ABI Heuristic ───
+  function detectByABI(abi) {
+    const { fns, events } = buildSignatureSet(abi);
+    const matched = [];
+
+    for (const std of STANDARDS) {
+      const fnsOk = hasAll(std.required, fns);
+      const eventsOk = !std.events || hasAll(std.events, events);
+
+      if (fnsOk && eventsOk) {
+        matched.push({
+          id: std.id,
+          name: std.name,
+          fullName: std.fullName,
+          color: std.color,
+          icon: std.icon,
+          interfaceId: std.interfaceId || null,
+          method: 'abi',
+          confidence: 'high'
+        });
+      }
+    }
+
+    // حذف زیرمجموعه‌ها اگر والد ضعیف‌تر است (اختیاری)
+    // مثلاً اگر ERC20Permit دارد، ERC20 هم دارد که خوب است
+
+    return matched;
+  }
+
+  // ─── Detect by ERC165 ───
+  async function detectByERC165(address) {
+    const results = [];
+    const checks = Object.entries(INTERFACE_IDS).filter(([, id]) => id !== null);
+
+    for (const [name, interfaceId] of checks) {
+      try {
+        // supportsInterface(bytes4)
+        const selector = '0x01ffc9a7';
+        const data = selector + interfaceId.slice(2).padStart(64, '0');
+
+        const res = await RPC.call('eth_call', [
+          { to: address, data },
+          'latest'
+        ]);
+
+        const supported = res && res !== '0x' && BigInt(res) === 1n;
+        if (supported) {
+          results.push(name);
+        }
+      } catch (err) {
+        // احتمالاً قرارداد ERC165 ندارد — بی‌صدا رد شو
+      }
+    }
+
+    return results;
+  }
+
+  // ─── Detect Proxy ───
+  async function detectProxy(address) {
+    const detected = [];
+
+    for (const [name, slot] of Object.entries(PROXY_SLOTS)) {
+      try {
+        const res = await RPC.call('eth_getStorageAt', [address, slot, 'latest']);
+        if (res && res !== '0x' && res.length > 2) {
+          const implAddress = '0x' + res.slice(26);
+          if (implAddress !== '0x0000000000000000000000000000000000000000') {
+            detected.push({
+              type: name,
+              implementation: implAddress
+            });
+          }
+        }
+      } catch (err) {
+        // نادیده بگیر
+      }
+    }
+
+    return detected;
+  }
+
+  // ─── Merge Results ───
+  function mergeResults(abiMatches, erc165Matches) {
+    const map = new Map();
+
+    // ابتدا ABI matches
+    for (const m of abiMatches) {
+      map.set(m.id, m);
+    }
+
+    // ERC165 matches: تأیید یا اضافه
+    const erc165ToId = {
+      ERC165: 'ERC165',
+      ERC721: 'ERC721',
+      ERC721Metadata: 'ERC721Metadata',
+      ERC721Enumerable: 'ERC721Enumerable',
+      ERC1155: 'ERC1155',
+      ERC1155MetadataURI: 'ERC1155',
+      ERC2981: 'ERC2981'
+    };
+
+    for (const name of erc165Matches) {
+      const id = erc165ToId[name] || name;
+      if (map.has(id)) {
+        // تأیید توسط ERC165
+        map.get(id).method = 'erc165';
+        map.get(id).confidence = 'verified';
+      } else {
+        // اضافه کن اگر در ABI نبود
+        const std = STANDARDS.find((s) => s.id === id);
+        if (std) {
+          map.set(id, {
+            id: std.id,
+            name: std.name,
+            fullName: std.fullName,
+            color: std.color,
+            icon: std.icon,
+            interfaceId: std.interfaceId || null,
+            method: 'erc165',
+            confidence: 'verified'
+          });
+        }
+      }
+    }
+
+    // ترتیب: استانداردهای اصلی اول
+    const order = ['ERC20', 'ERC721', 'ERC1155', 'ERC4626', 'ERC20Metadata',
+      'ERC721Metadata', 'ERC721Enumerable', 'ERC20Permit', 'ERC2981', 'ERC165',
+      'Ownable', 'AccessControl', 'Pausable', 'Multicall'];
+
+    return Array.from(map.values()).sort((a, b) => {
+      const ai = order.indexOf(a.id);
+      const bi = order.indexOf(b.id);
+      return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
+    });
+  }
+
+  // ─── Main Detect ───
+  async function detect(address, abi) {
+    const result = {
+      standards: [],
+      proxy: null,
+      isToken: false,
+      tokenType: null,
+      name: null,
+      symbol: null,
+      decimals: null,
+      totalSupply: null
+    };
+
+    // 1. ABI heuristic
+    const abiMatches = detectByABI(abi);
+
+    // 2. ERC165 on-chain
+    let erc165Matches = [];
+    if (abiMatches.some((m) => m.id === 'ERC165')) {
+      erc165Matches = await detectByERC165(address);
+    }
+
+    // 3. Merge
+    result.standards = mergeResults(abiMatches, erc165Matches);
+
+    // 4. Proxy
+    const proxies = await detectProxy(address);
+    if (proxies.length > 0) {
+      result.proxy = proxies[0];
+      result.standards.unshift({
+        id: 'PROXY',
+        name: 'Proxy',
+        fullName: proxies[0].type,
+        color: 'proxy',
+        icon: '🔗',
+        method: 'storage',
+        confidence: 'verified'
+      });
+    }
+
+    // 5. Token classification
+    const ids = result.standards.map((s) => s.id);
+    if (ids.includes('ERC20')) {
+      result.isToken = true;
+      result.tokenType = 'fungible';
+    } else if (ids.includes('ERC721')) {
+      result.isToken = true;
+      result.tokenType = 'nft';
+    } else if (ids.includes('ERC1155')) {
+      result.isToken = true;
+      result.tokenType = 'multi-token';
+    } else if (ids.includes('ERC4626')) {
+      result.isToken = true;
+      result.tokenType = 'vault';
+    }
+
+    // 6. خواندن متادیتا (اختیاری، اگر ERC20/721 بود)
+    if (result.isToken && abi) {
+      await fetchTokenMetadata(result, address, abi);
+    }
+
+    return result;
+  }
+
+  // ─── Fetch Token Metadata ───
+  async function fetchTokenMetadata(result, address, abi) {
+    const CONTRACT = window.APZ_CONTRACT;
+    if (!CONTRACT) return;
+
+    const tryCall = async (fnName, args = []) => {
+      try {
+        const fn = abi.find((x) =>
+          x.type === 'function' && x.name === fnName
+        );
+        if (!fn) return null;
+        if (!fn._selector) fn._selector = await CONTRACT.computeSelector(fn);
+        return await CONTRACT.callReadFunction(address, fn, args);
+      } catch {
+        return null;
+      }
+    };
+
+    const [name, symbol, decimals, totalSupply] = await Promise.all([
+      tryCall('name'),
+      tryCall('symbol'),
+      tryCall('decimals'),
+      tryCall('totalSupply')
+    ]);
+
+    result.name = name;
+    result.symbol = symbol;
+    result.decimals = decimals;
+    result.totalSupply = totalSupply;
+  }
+
+  // ─── Public API ───
+  window.APZ_STANDARD = {
+    detect,
+    detectByABI,
+    detectByERC165,
+    detectProxy,
+    INTERFACE_IDS,
+    STANDARDS
+  };
+})();
+```
+
+---
+
+2️⃣ 🔄 به‌روزرسانی contract-ui.js
+
+این تغییرات را اعمال کنید:
+
+2.1 افزودن تابع رندر badgeها:
+
+```javascript
+// ─── در contract-ui.js، بعد از getStateMutabilityBadge ───
+
+function renderStandardBadge(std) {
+  const tooltip = std.fullName + (std.method === 'erc165' ? ' · verified via ERC-165' : '');
+  const verified = std.confidence === 'verified' ? '✓ ' : '';
+  return `
+    <span class="std-badge std-${std.color}" title="${escapeHtml(tooltip)}">
+      <span class="std-badge-icon">${std.icon}</span>
+      <span class="std-badge-name">${verified}${escapeHtml(std.name)}</span>
+    </span>
+  `;
+}
+
+function renderStandardsRow(standards) {
+  if (!standards || standards.length === 0) return '';
+
+  return `
+    <div class="std-row">
+      ${standards.map(renderStandardBadge).join('')}
+    </div>
+  `;
+}
+
+function renderTokenInfo(info) {
+  if (!info.isToken) return '';
+
+  const parts = [];
+
+  if (info.name) {
+    parts.push(`
+      <div class="token-info-item">
+        <div class="token-info-label">Name</div>
+        <div class="token-info-value">${escapeHtml(info.name)}</div>
+      </div>
+    `);
+  }
+
+  if (info.symbol) {
+    parts.push(`
+      <div class="token-info-item">
+        <div class="token-info-label">Symbol</div>
+        <div class="token-info-value highlight">${escapeHtml(info.symbol)}</div>
+      </div>
+    `);
+  }
+
+  if (info.decimals != null) {
+    parts.push(`
+      <div class="token-info-item">
+        <div class="token-info-label">Decimals</div>
+        <div class="token-info-value">${info.decimals}</div>
+      </div>
+    `);
+  }
+
+  if (info.totalSupply) {
+    const supply = (() => {
+      try {
+        const dec = info.decimals != null ? Number(info.decimals) : 18;
+        const big = BigInt(info.totalSupply);
+        const div = 10n ** BigInt(dec);
+        return (Number(big / div) + Number(big % div) / Number(div)).toLocaleString('en-US', { maximumFractionDigits: 4 });
+      } catch {
+        return info.totalSupply;
+      }
+    })();
+    parts.push(`
+      <div class="token-info-item">
+        <div class="token-info-label">Total Supply</div>
+        <div class="token-info-value highlight">${escapeHtml(supply)}</div>
+      </div>
+    `);
+  }
+
+  if (info.proxy) {
+    parts.push(`
+      <div class="token-info-item">
+        <div class="token-info-label">Proxy</div>
+        <div class="token-info-value">
+          <span class="proxy-type">${escapeHtml(info.proxy.type)}</span>
+          <code class="proxy-impl" title="${escapeHtml(info.proxy.implementation)}">
+            ${info.proxy.implementation.slice(0, 10)}...${info.proxy.implementation.slice(-6)}
+          </code>
+        </div>
+      </div>
+    `);
+  }
+
+  if (parts.length === 0) return '';
+
+  return `
+    <div class="token-info">
+      <div class="token-info-header">
+        <span class="token-type-chip token-type-${info.tokenType}">
+          ${info.tokenType === 'fungible' ? '🪙 Fungible' :
+            info.tokenType === 'nft' ? '🖼️ NFT' :
+            info.tokenType === 'multi-token' ? '🎨 Multi-Token' :
+            info.tokenType === 'vault' ? '🏦 Vault' : info.tokenType}
+        </span>
+      </div>
+      <div class="token-info-grid">
+        ${parts.join('')}
+      </div>
+    </div>
+  `;
+}
+```
+
+2.2 جایگزینی renderContractHeader:
+
+```javascript
+function renderContractHeader(address, abiInfo, bytecode, standardInfo) {
+  const isVerified = abiInfo?.verified;
+  const isDecompiled = abiInfo?.source?.includes('heimdall');
+  const hasABI = abiInfo?.abi && abiInfo.abi.length > 0;
+
+  let statusBadge = '';
+  if (hasABI && isVerified) {
+    statusBadge = `<span class="badge success">✓ ${t('verified')}</span>`;
+  } else if (isDecompiled) {
+    statusBadge = `<span class="badge pending">⚙ ${t('decompiled')}</span>`;
+  } else if (!hasABI) {
+    statusBadge = `<span class="badge failed">${t('unverified')}</span>`;
+  }
+
+  return `
+    <div class="result-card contract-header">
+      <div class="result-card-header">
+        <div class="result-card-icon contract">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/>
+            <polyline points="14 2 14 8 20 8"/>
+            <line x1="16" y1="13" x2="8" y2="13"/>
+            <line x1="16" y1="17" x2="8" y2="17"/>
+            <polyline points="10 9 9 9 8 9"/>
+          </svg>
+        </div>
+        <div style="flex:1;min-width:0">
+          <div class="result-card-title">
+            ${t('contractTitle')} ${statusBadge}
+          </div>
+          <div class="result-card-subtitle">${shortHash(address, 10)}</div>
+        </div>
+      </div>
+
+      ${standardInfo && standardInfo.standards.length ? renderStandardsRow(standardInfo.standards) : ''}
+      ${standardInfo ? renderTokenInfo(standardInfo) : ''}
+
+      <div class="field-grid">
+        <div class="field-item" style="grid-column:1/-1">
+          <div class="field-label">Address</div>
+          <div class="address-display">
+            <span>${escapeHtml(address)}</span>
+            <button class="copy-btn" data-copy="${escapeHtml(address)}">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>
+                <path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+
+        ${abiInfo?.source ? `
+          <div class="field-item">
+            <div class="field-label">${t('source')}</div>
+            <div class="field-value dim">${escapeHtml(abiInfo.source)}</div>
+          </div>
+        ` : ''}
+
+        ${abiInfo?.compiler ? `
+          <div class="field-item">
+            <div class="field-label">${t('compiler')}</div>
+            <div class="field-value dim">${escapeHtml(abiInfo.compiler)}</div>
+          </div>
+        ` : ''}
+
+        ${abiInfo?.contractName ? `
+          <div class="field-item">
+            <div class="field-label">Name</div>
+            <div class="field-value">${escapeHtml(abiInfo.contractName)}</div>
+          </div>
+        ` : ''}
+
+        ${bytecode && bytecode !== '0x' ? `
+          <div class="field-item" style="grid-column:1/-1">
+            <div class="field-label">${t('bytecode')}</div>
+            <div class="bytecode-preview" id="bytecode-preview">
+              <code>${escapeHtml(bytecode.slice(0, 130))}...</code>
+              <span class="bytecode-size">${(bytecode.length / 2 - 1).toLocaleString()} bytes</span>
+            </div>
+            <div class="share-actions-inline" style="margin-top:10px">
+              <button class="btn btn-ghost small" id="copy-bytecode-btn">
+                📋 ${t('copyBytecode')}
+              </button>
+              <button class="btn btn-ghost small" id="toggle-bytecode-btn">
+                👁 View Full
+              </button>
+            </div>
+            <pre class="bytecode-full" id="bytecode-full" hidden>${escapeHtml(bytecode)}</pre>
+          </div>
+        ` : ''}
+
+        ${!hasABI ? `
+          <div class="field-item" style="grid-column:1/-1">
+            <div class="abi-missing-notice">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"/>
+                <line x1="12" y1="8" x2="12" y2="12"/>
+                <line x1="12" y1="16" x2="12.01" y2="16"/>
+              </svg>
+              <div>
+                <strong>${t('noABI')}</strong>
+                <p>${t('noABINote')}</p>
+              </div>
+            </div>
+          </div>
+        ` : ''}
+      </div>
+    </div>
+  `;
+}
+```
+
+2.3 به‌روزرسانی renderContract برای پاس دادن standardInfo:
+
+```javascript
+function renderContract(address, abiInfo, bytecode, standardInfo, toastFn) {
+  const abi = abiInfo?.abi || [];
+  const functions = abi.filter((x) => x.type === 'function');
+  const events = abi.filter((x) => x.type === 'event');
+  const readFns = functions.filter((f) => f.stateMutability === 'view' || f.stateMutability === 'pure' || f.constant);
+  const writeFns = functions.filter((f) => !(f.stateMutability === 'view' || f.stateMutability === 'pure' || f.constant));
+
+  let html = renderContractHeader(address, abiInfo, bytecode, standardInfo);
+
+  // ... بقیه مثل قبل
+}
+```
+
+---
+
+3️⃣ docs/assets/css/standards.css
+
+```css
+/* ═══════════════════════════════════════════════
+   APZ Wallet — Standard Badges Styles
+   ═══════════════════════════════════════════════ */
+
+/* ─── Standards Row ─── */
+.std-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 12px 0;
+  margin-bottom: 4px;
+  border-top: 1px dashed var(--border);
+  border-bottom: 1px dashed var(--border);
+}
+
+/* ─── Standard Badge Base ─── */
+.std-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: default;
+  transition: transform 150ms, box-shadow 150ms;
+  border: 1px solid transparent;
+  white-space: nowrap;
+  position: relative;
+}
+
+.std-badge:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+}
+
+.std-badge-icon {
+  font-size: 0.85rem;
+  line-height: 1;
+}
+
+.std-badge-name {
+  font-size: 0.7rem;
+}
+
+/* ─── Color Variants ─── */
+
+/* ERC-20 — سبز (Fungible) */
+.std-erc20 {
+  background: linear-gradient(135deg, rgba(0, 255, 136, 0.15), rgba(0, 200, 100, 0.1));
+  color: #00ff88;
+  border-color: rgba(0, 255, 136, 0.35);
+  box-shadow: 0 0 12px rgba(0, 255, 136, 0.1);
+}
+
+/* ERC-20 Metadata — سبز ملایم */
+.std-erc20meta {
+  background: rgba(0, 255, 136, 0.06);
+  color: rgba(0, 255, 136, 0.8);
+  border-color: rgba(0, 255, 136, 0.2);
+}
+
+/* ERC-20 Permit — زرد طلایی */
+.std-permit {
+  background: linear-gradient(135deg, rgba(255, 203, 107, 0.15), rgba(255, 152, 0, 0.1));
+  color: #ffcb6b;
+  border-color: rgba(255, 203, 107, 0.35);
+}
+
+/* ERC-721 — بنفش (NFT) */
+.std-erc721 {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.15), rgba(139, 92, 246, 0.1));
+  color: #c8a3f7;
+  border-color: rgba(168, 85, 247, 0.35);
+  box-shadow: 0 0 12px rgba(168, 85, 247, 0.1);
+}
+
+.std-erc721meta {
+  background: rgba(168, 85, 247, 0.06);
+  color: rgba(200, 163, 247, 0.85);
+  border-color: rgba(168, 85, 247, 0.2);
+}
+
+.std-erc721enum {
+  background: rgba(168, 85, 247, 0.06);
+  color: rgba(200, 163, 247, 0.85);
+  border-color: rgba(168, 85, 247, 0.2);
+}
+
+/* ERC-1155 — نارنجی (Multi-token) */
+.std-erc1155 {
+  background: linear-gradient(135deg, rgba(247, 164, 93, 0.15), rgba(255, 100, 0, 0.1));
+  color: #f7a45d;
+  border-color: rgba(247, 164, 93, 0.35);
+  box-shadow: 0 0 12px rgba(247, 164, 93, 0.1);
+}
+
+/* ERC-165 — آبی روشن */
+.std-erc165 {
+  background: rgba(0, 184, 255, 0.1);
+  color: #00b8ff;
+  border-color: rgba(0, 184, 255, 0.3);
+}
+
+/* ERC-2981 — صورتی (Royalty) */
+.std-erc2981 {
+  background: linear-gradient(135deg, rgba(255, 105, 180, 0.15), rgba(236, 72, 153, 0.1));
+  color: #ff8fc7;
+  border-color: rgba(255, 105, 180, 0.35);
+}
+
+/* ERC-4626 — فیروزه‌ای (Vault) */
+.std-erc4626 {
+  background: linear-gradient(135deg, rgba(0, 255, 204, 0.15), rgba(0, 184, 255, 0.1));
+  color: var(--neon);
+  border-color: rgba(0, 255, 204, 0.35);
+  box-shadow: 0 0 12px rgba(0, 255, 204, 0.12);
+}
+
+/* Ownable — طلایی */
+.std-ownable {
+  background: linear-gradient(135deg, rgba(255, 215, 0, 0.15), rgba(255, 180, 0, 0.1));
+  color: #ffd700;
+  border-color: rgba(255, 215, 0, 0.35);
+}
+
+/* AccessControl — قرمز-نارنجی */
+.std-access {
+  background: linear-gradient(135deg, rgba(255, 87, 87, 0.15), rgba(255, 56, 96, 0.1));
+  color: #ff6b6b;
+  border-color: rgba(255, 87, 87, 0.35);
+}
+
+/* Pausable — خاکستری-آبی */
+.std-pausable {
+  background: rgba(136, 146, 176, 0.12);
+  color: #b0b8d0;
+  border-color: rgba(136, 146, 176, 0.3);
+}
+
+/* Multicall — سبز-آبی */
+.std-multicall {
+  background: rgba(0, 200, 160, 0.12);
+  color: #00c8a0;
+  border-color: rgba(0, 200, 160, 0.3);
+}
+
+/* Proxy — نئون آبی با انیمیشن */
+.std-proxy {
+  background: linear-gradient(135deg, rgba(0, 255, 204, 0.2), rgba(0, 184, 255, 0.15));
+  color: var(--neon);
+  border-color: var(--neon);
+  box-shadow: 0 0 16px rgba(0, 255, 204, 0.2);
+  animation: proxyPulse 3s ease-in-out infinite;
+}
+
+@keyframes proxyPulse {
+  0%, 100% { box-shadow: 0 0 16px rgba(0, 255, 204, 0.2); }
+  50% { box-shadow: 0 0 24px rgba(0, 255, 204, 0.4); }
+}
+
+/* ─── Token Info Block ─── */
+.token-info {
+  padding: 16px 0;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: 4px;
+}
+
+.token-info-header {
+  margin-bottom: 12px;
+}
+
+.token-type-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.token-type-fungible {
+  background: linear-gradient(135deg, rgba(0, 255, 136, 0.15), rgba(0, 200, 100, 0.1));
+  color: #00ff88;
+  border: 1px solid rgba(0, 255, 136, 0.35);
+}
+
+.token-type-nft {
+  background: linear-gradient(135deg, rgba(168, 85, 247, 0.15), rgba(139, 92, 246, 0.1));
+  color: #c8a3f7;
+  border: 1px solid rgba(168, 85, 247, 0.35);
+}
+
+.token-type-multi-token {
+  background: linear-gradient(135deg, rgba(247, 164, 93, 0.15), rgba(255, 100, 0, 0.1));
+  color: #f7a45d;
+  border: 1px solid rgba(247, 164, 93, 0.35);
+}
+
+.token-type-vault {
+  background: linear-gradient(135deg, rgba(0, 255, 204, 0.15), rgba(0, 184, 255, 0.1));
+  color: var(--neon);
+  border: 1px solid rgba(0, 255, 204, 0.35);
+}
+
+.token-info-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+}
+
+.token-info-item {
+  min-width: 0;
+}
+
+.token-info-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--text-dimmer);
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.token-info-value {
+  font-family: var(--font-mono);
+  font-size: 0.88rem;
+  color: var(--text);
+  word-break: break-word;
+}
+
+.token-info-value.highlight {
+  color: var(--neon);
+  font-weight: 600;
+}
+
+/* ─── Proxy Display ─── */
+.proxy-type {
+  display: inline-block;
+  padding: 2px 8px;
+  font-size: 0.68rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  border-radius: 4px;
+  background: rgba(0, 255, 204, 0.1);
+  color: var(--neon);
+  border: 1px solid rgba(0, 255, 204, 0.2);
+  margin-inline-end: 6px;
+}
+
+.proxy-impl {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: #00b8ff;
+  padding: 2px 8px;
+  background: rgba(0, 184, 255, 0.08);
+  border-radius: 4px;
+}
+
+/* ─── Responsive ─── */
+@media (max-width: 640px) {
+  .std-row {
+    gap: 6px;
+  }
+
+  .std-badge {
+    padding: 4px 10px;
+    font-size: 0.68rem;
+  }
+
+  .std-badge-name {
+    font-size: 0.66rem;
+  }
+
+  .token-info-grid {
+    grid-template-columns: 1fr;
+  }
+}
+```
+
+---
+
+4️⃣ 🔄 ادغام در explorer.js
+
+این تغییرات را اعمال کنید:
+
+```javascript
+// ─── در بالای فایل ───
+const STANDARD = window.APZ_STANDARD;
+
+// ─── در performSearch، بخش contract ───
+if (info.isContract) {
+  const chainId = RPC.hexToNumber(await RPC.getChainId());
+
+  // موازی: ABI + Source + Bytecode + Standard Detection
+  const [abiInfo, sourceInfo, bytecode] = await Promise.all([
+    ABI.fetchABI(chainId, query),
+    SOURCE.fetchSource(chainId, query),
+    RPC.getCode(query)
+  ]);
+
+  const finalAbiInfo = (sourceInfo.abi && (!abiInfo.abi || !abiInfo.verified))
+    ? { ...abiInfo, abi: sourceInfo.abi, verified: true, source: sourceInfo.source }
+    : abiInfo;
+
+  if (finalAbiInfo.abi) {
+    await CONTRACT.attachSelectors(finalAbiInfo.abi);
+  }
+  window.__currentABI = (finalAbiInfo.abi || []).filter((x) => x.type === 'function');
+
+  // ✨ تشخیص استاندارد (موازی با کارهای دیگر)
+  let standardInfo = null;
+  try {
+    standardInfo = await STANDARD.detect(query, finalAbiInfo.abi || []);
+    console.log('[Standard] Detected:', standardInfo.standards.map((s) => s.name));
+  } catch (err) {
+    console.warn('[Standard] Detection failed:', err);
+  }
+
+  // ─── ذخیره داده‌ها ───
+  currentContractData = {
+    address: query,
+    chainId,
+    abiInfo: finalAbiInfo,
+    sourceInfo,
+    bytecode,
+    standardInfo
+  };
+
+  // ─── ساخت محتوای تب‌ها ───
+  const overviewHtml = CONTRACT_UI.renderContract(query, finalAbiInfo, bytecode, standardInfo, showToast);
+  // ... rest (source, docs, abi) مثل قبل
+}
+```
+
+افزودن i18n برای استانداردها (اختیاری):
+
+در EXPLORER_I18N به هر زبان اضافه کنید:
+
+```javascript
+// en:
+standards: {
+  detected: 'Detected Standards',
+  verified: 'Verified',
+  erc20: 'Fungible Token',
+  erc721: 'NFT Collection',
+  erc1155: 'Multi-Token',
+  erc4626: 'Tokenized Vault',
+  proxy: 'Proxy Contract'
+}
+
+// fa:
+standards: {
+  detected: 'استانداردهای شناسایی‌شده',
+  verified: 'تأییدشده',
+  erc20: 'توکن قابل تعویض',
+  erc721: 'مجموعه NFT',
+  erc1155: 'چند-توکنی',
+  erc4626: 'خزانه توکن‌شده',
+  proxy: 'قرارداد پروکسی'
+}
+
+// de:
+standards: {
+  detected: 'Erkannte Standards',
+  verified: 'Verifiziert',
+  erc20: 'Fungible Token',
+  erc721: 'NFT-Sammlung',
+  erc1155: 'Multi-Token',
+  erc4626: 'Tokenisierter Vault',
+  proxy: 'Proxy-Vertrag'
+}
+```
+
+---
+
+5️⃣ 🔄 به‌روزرسانی explorer.html
+
+در <head>:
+
+```html
+<link rel="stylesheet" href="assets/css/standards.css" />
+```
+
+قبل از explorer.js:
+
+```html
+<script src="assets/js/standard-detector.js"></script>
+```
+
+---
+
+6️⃣ 🔄 به‌روزرسانی sw.js
+
+```javascript
+'./assets/css/standards.css',
+'./assets/js/standard-detector.js'
+```
+
+---
+
+7️⃣ 📊 پیش‌نمایش UI
+
+```
+╔══════════════════════════════════════════════════════════╗
+║  📄 Smart Contract  [✓ Verified]                        ║
+║  0x742d35Cc...f0bEb                                    ║
+╠══════════════════════════════════════════════════════════╣
+║  🪙 ERC-20  📋 ERC-20 Metadata  ⚡ ERC-20 Permit       ║
+║  👑 Ownable  ⏸️ Pausable  🔍 ERC-165                   ║
+╠══════════════════════════════════════════════════════════╣
+║  🪙 Fungible                                             ║
+║  ┌───────────────┬───────────────┬───────────────────┐  ║
+║  │ Name          │ Symbol        │ Decimals          │  ║
+║  │ APZ Token     │ APZ           │ 18                │  ║
+║  ├───────────────┴───────────────┴───────────────────┤  ║
+║  │ Total Supply                                       │  ║
+║  │ 1,000,000,000                                      │  ║
+║  └────────────────────────────────────────────────────┘  ║
+╠══════════════════════════════════════════════════════════╣
+║  برای یک پروکسی:                                        ║
+║  🔗 Proxy  🪙 ERC-20                                    ║
+║  ┌────────────────────────────────────────────────────┐  ║
+║  │ Proxy        eip1967-impl                          │  ║
+║  │              0x1234ab...cd5678                     │  ║
+║  └────────────────────────────────────────────────────┘  ║
+╚══════════════════════════════════════════════════════════╝
+```
+
+---
+
+8️⃣ 🧪 تست
+
+تست ABI-only:
+
+```javascript
+const erc20Abi = [
+  { type: 'function', name: 'transfer', inputs: [{type:'address'},{type:'uint256'}], outputs: [{type:'bool'}], stateMutability: 'nonpayable' },
+  { type: 'function', name: 'transferFrom', inputs: [{type:'address'},{type:'address'},{type:'uint256'}], outputs: [{type:'bool'}] },
+  { type: 'function', name: 'approve', inputs: [{type:'address'},{type:'uint256'}], outputs: [{type:'bool'}] },
+  { type: 'function', name: 'balanceOf', inputs: [{type:'address'}], outputs: [{type:'uint256'}] },
+  { type: 'function', name: 'totalSupply', inputs: [], outputs: [{type:'uint256'}] },
+  { type: 'function', name: 'allowance', inputs: [{type:'address'},{type:'address'}], outputs: [{type:'uint256'}] },
+  { type: 'function', name: 'name', inputs: [], outputs: [{type:'string'}] },
+  { type: 'function', name: 'symbol', inputs: [], outputs: [{type:'string'}] },
+  { type: 'function', name: 'decimals', inputs: [], outputs: [{type:'uint8'}] },
+  { type: 'event', name: 'Transfer', inputs: [{type:'address',indexed:true},{type:'address',indexed:true},{type:'uint256'}] },
+  { type: 'event', name: 'Approval', inputs: [{type:'address',indexed:true},{type:'address',indexed:true},{type:'uint256'}] }
+];
+
+const detected = APZ_STANDARD.detectByABI(erc20Abi);
+console.log(detected.map(s => s.name));
+// → ['ERC-20', 'ERC-20 Metadata']
+```
+
+تست کامل با آدرس:
+
+```javascript
+const result = await APZ_STANDARD.detect('0xdAC17F958D2ee523a2206206994597C13D831ec7', erc20Abi);
+console.log(result);
+// → {
+//     standards: [...],
+//     isToken: true,
+//     tokenType: 'fungible',
+//     name: 'Tether USD',
+//     symbol: 'USDT',
+//     decimals: 6,
+//     totalSupply: '...',
+//     proxy: null
+//   }
+```
+
+تست ERC721:
+
+```javascript
+const erc721Abi = [
+  { type: 'function', name: 'ownerOf', inputs: [{type:'uint256'}], outputs: [{type:'address'}] },
+  { type: 'function', name: 'balanceOf', inputs: [{type:'address'}], outputs: [{type:'uint256'}] },
+  // ... بقیه
+];
+const detected = APZ_STANDARD.detectByABI(erc721Abi);
+// → ['ERC-721', ...]
+```
+
+---
+
+9️⃣ 📋 چک‌لیست نهایی
+
+☐ standard-detector.js ساخته شد
+☐ standards.css ساخته شد
+☐ contract-ui.js به‌روز شد (badgeها + token info)
+☐ explorer.js ادغام شد
+☐ explorer.html اسکریپت‌ها اضافه شد
+☐ sw.js precache شد
+☐ i18n (FA/EN/DE) اضافه شد
+☐ تست با ERC20 واقعی موفق
+☐ تست با ERC721 واقعی موفق
+☐ تست با ERC1155 واقعی موفق
+☐ تست با پروکسی (USDC) موفق
+☐ ERC165 تأیید روی زنجیره کار می‌کند
+☐ Responsive موبایل
+☐ RTL فارسی
+
+---
+
+🔟 🎯 استانداردهای پشتیبانی‌شده
+
+استاندارد رنگ آیکون تشخیص از
+ERC-20 🟢 سبز 🪙 ABI
+ERC-20 Metadata 🟢 سبز ملایم 📋 ABI
+ERC-20 Permit 🟡 طلایی ⚡ ABI
+ERC-721 🟣 بنفش 🖼️ ABI + ERC165
+ERC-721 Metadata 🟣 بنفش ملایم 📋 ABI + ERC165
+ERC-721 Enumerable 🟣 بنفش ملایم 📚 ABI + ERC165
+ERC-1155 🟠 نارنجی 🎨 ABI + ERC165
+ERC-165 🔵 آبی 🔍 ABI + ERC165
+ERC-2981 💗 صورتی 💎 ABI + ERC165
+ERC-4626 💎 فیروزه 🏦 ABI
+Ownable 👑 طلایی 👑 ABI
+AccessControl 🔴 قرمز 🔐 ABI
+Pausable ⚪ خاکستری ⏸️ ABI
+Multicall 💚 سبز-آبی 📦 ABI
+Proxy (EIP-1967/1822) ✨ نئون 🔗 Storage slot
+
+---
+
+1️⃣1️⃣ 🎁 نکات پیشرفته
+
+1. Badge کلیک‌پذیر برای فیلتر کردن توابع:
+
+```javascript
+document.querySelectorAll('.std-badge').forEach((badge) => {
+  badge.addEventListener('click', () => {
+    const stdId = badge.dataset.stdId;
+    // فیلتر توابع مربوطه
+    filterFunctionsByStandard(stdId);
+  });
+});
+```
+
+2. Export لیست استانداردها:
+
+```javascript
+// API عمومی
+const standards = APZ_STANDARD.detect(address, abi);
+// standards.standards → آرایه‌ای از اشیاء
+```
+
+3. افزودن استانداردهای بیشتر:
+
+در STANDARDS array، استاندارد جدید با required و events تعریف کنید:
+
+```javascript
+{
+  id: 'ERC1155Supply',
+  name: 'ERC-1155 Supply',
+  color: 'erc1155supply',
+  icon: '📊',
+  parent: 'ERC1155',
+  required: ['totalSupply(uint256)', 'exists(uint256)']
+}
+```
+
+4. نمایش استانداردهای ناشناخته:
+
+اگر supportsInterface بزند ولی استاندارد شناخته‌شده نباشد، UnknownInterface نمایش دهید.
+
+5. Copy to clipboard استاندارد:
+
+```javascript
+badge.addEventListener('click', () => {
+  copyToClipboard(`Standard: ${badge.dataset.stdName}\nInterface ID: ${badge.dataset.interfaceId}`);
+});
+```

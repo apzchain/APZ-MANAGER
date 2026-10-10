@@ -1,0 +1,993 @@
+📦 پکیج کامل اجرای APZ Manager روی اندروید
+
+در ادامه همه‌ی فایل‌های ضروری به‌صورت آماده و قابل کپی تولید شده است. ساختار پیشنهادی:
+
+```
+apz-android/
+├── apz_android.sh              # نصب‌کننده اصلی در Termux
+├── setup_proot.sh              # راه‌اندازی Ubuntu proot (برای PDF/YARA کامل)
+├── requirements-android.txt    # وابستگی‌های سازگار با اندروید
+├── run_android.sh              # اجرای سریع تحلیل
+├── report_generator_patch.py   # نسخه‌ی پچ‌شده (بدون weasyprint)
+├── patch_apz_manager.py        # پچ خودکار apz_manager.py برای اندروید
+├── .env.android.example        # نمونه‌ی کلیدهای API
+└── README_ANDROID.md           # راهنمای خلاصه
+```
+
+---
+
+۱) apz_android.sh — نصب‌کننده اصلی در Termux
+
+```bash
+#!/data/data/com.termux/files/usr/bin/bash
+# ============================================================
+#  APZ Manager - Android Installer (Termux native)
+#  Author: APZ Security Team
+#  License: GPLv3
+# ============================================================
+set -e
+
+REPO_URL="${APZ_REPO_URL:-https://github.com/your-org/apz-manager.git}"
+WORK_DIR="${HOME}/apz-manager"
+VENV_DIR="${WORK_DIR}/venv"
+
+c_green()  { printf "\033[1;32m%s\033[0m\n" "$1"; }
+c_yellow() { printf "\033[1;33m%s\033[0m\n" "$1"; }
+c_red()    { printf "\033[1;31m%s\033[0m\n" "$1"; }
+c_cyan()   { printf "\033[1;36m%s\033[0m\n" "$1"; }
+
+banner() {
+    echo "============================================================"
+    echo "        APZ Manager – Android Installer (Termux)            "
+    echo "============================================================"
+}
+
+check_termux() {
+    if [ ! -d "/data/data/com.termux" ]; then
+        c_red "[!] این اسکریپت باید داخل Termux اجرا شود."
+        exit 1
+    fi
+}
+
+install_system_deps() {
+    c_cyan ">>> [1/6] نصب پیش‌نیازهای سیستمی..."
+    pkg update -y
+    pkg upgrade -y
+    pkg install -y \
+        python python-pip git clang make binutils pkg-config \
+        rust libxml2 libxslt libffi openssl zlib \
+        libjpeg-turbo freetype libyaml libcrypt libandroid-support \
+        termux-api
+    c_green "[+] پیش‌نیازها نصب شد."
+}
+
+clone_repo() {
+    c_cyan ">>> [2/6] دریافت ریپازیتوری..."
+    if [ -d "${WORK_DIR}" ]; then
+        c_yellow "[=] ریپازیتوری موجود است، به‌روزرسانی می‌شود..."
+        cd "${WORK_DIR}" && git pull --rebase || true
+    else
+        git clone "${REPO_URL}" "${WORK_DIR}"
+    fi
+    cd "${WORK_DIR}"
+    c_green "[+] ریپازیتوری آماده است: ${WORK_DIR}"
+}
+
+setup_venv() {
+    c_cyan ">>> [3/6] ساخت محیط مجازی پایتون..."
+    if [ ! -d "${VENV_DIR}" ]; then
+        python -m venv "${VENV_DIR}"
+    fi
+    # shellcheck disable=SC1091
+    source "${VENV_DIR}/bin/activate"
+    pip install --upgrade pip wheel setuptools
+    c_green "[+] محیط مجازی فعال است."
+}
+
+install_python_deps() {
+    c_cyan ">>> [4/6] نصب وابستگی‌های پایتون (ممکن است چند دقیقه طول بکشد)..."
+    if [ -f "requirements-android.txt" ]; then
+        pip install -r requirements-android.txt
+    else
+        c_yellow "[!] requirements-android.txt پیدا نشد، از لیست پیش‌فرض استفاده می‌شود..."
+        pip install \
+            androguard \
+            pyyaml \
+            flask \
+            sqlalchemy \
+            yara-python \
+            requests \
+            rich
+    fi
+    c_green "[+] وابستگی‌های پایتون نصب شد."
+}
+
+verify_install() {
+    c_cyan ">>> [5/6] بررسی صحت نصب..."
+    python - <<'PYEOF'
+import sys
+mods = ["androguard", "yara", "flask", "sqlalchemy", "requests"]
+missing = []
+for m in mods:
+    try:
+        __import__(m)
+        print(f"  [OK] {m}")
+    except Exception as e:
+        print(f"  [!!] {m} -> {e}")
+        missing.append(m)
+if missing:
+    print("\n[!] ماژول‌های ناموجود:", ", ".join(missing))
+    sys.exit(1)
+print("\n[+] همه‌ی ماژول‌های اصلی آماده‌اند.")
+PYEOF
+    c_green "[+] بررسی کامل شد."
+}
+
+apply_patches() {
+    c_cyan ">>> [6/6] اعمال پچ‌های مخصوص اندروید..."
+    if [ -f "patch_apz_manager.py" ]; then
+        python patch_apz_manager.py || c_yellow "[!] پچ خودکار با خطا مواجه شد (ادامه می‌دهیم)."
+    fi
+    # جایگزینی report_generator
+    if [ -f "report_generator_patch.py" ]; then
+        cp -n report_generator.py report_generator.py.bak 2>/dev/null || true
+        cp report_generator_patch.py report_generator.py
+        c_green "[+] report_generator.py با نسخه‌ی سازگار جایگزین شد."
+    fi
+}
+
+show_footer() {
+    echo
+    c_green "============================================================"
+    c_green "        ✅ نصب APZ Manager روی اندروید کامل شد              "
+    c_green "============================================================"
+    echo
+    echo "برای اجرای تحلیل:"
+    echo "  bash ~/apz-manager/run_android.sh /sdcard/Download/app.apk"
+    echo
+    echo "برای فعال‌سازی دسترسی به حافظه‌ی گوشی (یک‌بار):"
+    echo "  termux-setup-storage"
+    echo
+    echo "برای اجرای API:"
+    echo "  cd ~/apz-manager && source venv/bin/activate && python apz_api.py"
+    echo
+}
+
+main() {
+    banner
+    check_termux
+    install_system_deps
+    clone_repo
+    setup_venv
+    install_python_deps
+    verify_install
+    apply_patches
+    show_footer
+}
+
+main "$@"
+```
+
+---
+
+۲) setup_proot.sh — نصب کامل با Ubuntu (PDF + YARA پایدار)
+
+```bash
+#!/data/data/com.termux/files/usr/bin/bash
+# ============================================================
+#  APZ Manager - Ubuntu proot installer (کامل‌ترین حالت)
+#  برای زمانی که weasyprint / yara-python کامل لازم است
+# ============================================================
+set -e
+
+DISTRO="ubuntu"
+USER_NAME="apz"
+REPO_URL="${APZ_REPO_URL:-https://github.com/your-org/apz-manager.git}"
+
+c_green()  { printf "\033[1;32m%s\033[0m\n" "$1"; }
+c_cyan()   { printf "\033[1;36m%s\033[0m\n" "$1"; }
+
+c_cyan ">>> نصب proot-distro..."
+pkg install -y proot-distro
+
+c_cyan ">>> نصب Ubuntu..."
+if ! proot-distro list | grep -q "${DISTRO}.*installed"; then
+    proot-distro install "${DISTRO}"
+fi
+
+c_cyan ">>> ساخت اسکریپت راه‌انداز داخل Ubuntu..."
+cat > /data/data/com.termux/files/home/ubuntu_setup.sh <<'UBUNTU_EOF'
+#!/bin/bash
+set -e
+export DEBIAN_FRONTEND=noninteractive
+
+echo ">>> [Ubuntu] به‌روزرسانی مخازن..."
+apt update && apt upgrade -y
+
+echo ">>> [Ubuntu] نصب پیش‌نیازها..."
+apt install -y \
+    python3 python3-pip python3-venv git curl wget \
+    build-essential pkg-config \
+    libyara-dev yara \
+    libxml2-dev libxslt1-dev libffi-dev \
+    libjpeg-dev libfreetype6-dev zlib1g-dev \
+    libpango-1.0-0 libpangoft2-1.0-0 libcairo2 \
+    shared-mime-info
+
+echo ">>> [Ubuntu] کلون ریپازیتوری..."
+cd /root
+[ -d apz-manager ] || git clone "${APZ_REPO_URL:-https://github.com/your-org/apz-manager.git}"
+cd apz-manager
+
+echo ">>> [Ubuntu] ساخت venv..."
+python3 -m venv venv
+source venv/bin/activate
+pip install --upgrade pip wheel setuptools
+
+echo ">>> [Ubuntu] نصب وابستگی‌ها..."
+pip install -r requirements-android.txt || \
+pip install androguard pyyaml flask sqlalchemy yara-python weasyprint requests rich
+
+echo ">>> [Ubuntu] بررسی..."
+python -c "import androguard,yara,flask,sqlalchemy; print('OK core')"
+python -c "import weasyprint; print('OK weasyprint')" || echo "[!] weasyprint نصب نشد – PDF غیرفعال"
+
+echo "✅ داخل Ubuntu آماده شد. برای اجرا:"
+echo "  proot-distro login ubuntu"
+echo "  cd /root/apz-manager && source venv/bin/activate"
+echo "  python apz_manager.py --file /root/sample.apk --output /root/out.json"
+UBUNTU_EOF
+
+chmod +x /data/data/com.termux/files/home/ubuntu_setup.sh
+
+c_cyan ">>> اجرای اسکریپت نصب داخل Ubuntu..."
+proot-distro login "${DISTRO}" --shared-tmp -- /bin/bash /data/data/com.termux/files/home/ubuntu_setup.sh
+
+c_green "============================================================"
+c_green "  ✅ Ubuntu proot + APZ Manager آماده است                     "
+c_green "============================================================"
+echo
+echo "برای ورود به Ubuntu:"
+echo "  proot-distro login ${DISTRO}"
+echo
+echo "نمونه اجرا داخل Ubuntu:"
+echo "  cd /root/apz-manager && source venv/bin/activate"
+echo "  python apz_manager.py --file /sdcard/Download/app.apk --output out.json --db"
+```
+
+---
+
+۳) requirements-android.txt — وابستگی‌های سازگار
+
+```txt
+# ============================================================
+#  APZ Manager – Android/Termux requirements
+#  (سازگار با Termux native + Ubuntu proot)
+# ============================================================
+
+# --- هسته‌ی تحلیل APK ---
+androguard>=3.4.0
+
+# --- پیکربندی ---
+pyyaml>=6.0
+
+# --- YARA (روی Termux نیاز به libyara-dev دارد) ---
+yara-python>=4.3.0
+
+# --- API و دیتابیس ---
+flask>=2.0
+sqlalchemy>=1.4
+
+# --- ابزارهای جانبی ---
+requests>=2.28
+rich>=13.0
+python-dotenv>=1.0
+
+# --- تولید گزارش ---
+jinja2>=3.0
+
+# ============================================================
+#  تذکر مهم:
+#  weasyprint روی Termux native به‌سختی نصب می‌شود.
+#  اگر PDF لازم دارید، از setup_proot.sh (Ubuntu) استفاده کنید و
+#  سپس weasyprint را دستی نصب کنید:
+#     pip install weasyprint
+# ============================================================
+
+# weasyprint>=60.0   # ← فقط در Ubuntu proot فعال شود
+```
+
+---
+
+۴) run_android.sh — اجرای سریع تحلیل
+
+```bash
+#!/data/data/com.termux/files/usr/bin/bash
+# ============================================================
+#  APZ Manager - Quick runner for Android/Termux
+#  Usage:
+#     bash run_android.sh /sdcard/Download/app.apk
+#     bash run_android.sh /sdcard/Download/app.apk --api
+#     bash run_android.sh --batch list.txt
+# ============================================================
+set -e
+
+WORK_DIR="${HOME}/apz-manager"
+VENV_DIR="${WORK_DIR}/venv"
+OUT_DIR="${HOME}/apz-reports"
+
+c_green()  { printf "\033[1;32m%s\033[0m\n" "$1"; }
+c_red()    { printf "\033[1;31m%s\033[0m\n" "$1"; }
+c_cyan()   { printf "\033[1;36m%s\033[0m\n" "$1"; }
+
+# --- بررسی محیط ---
+if [ ! -d "${WORK_DIR}" ]; then
+    c_red "[!] APZ Manager نصب نشده. ابتدا apz_android.sh را اجرا کنید."
+    exit 1
+fi
+
+cd "${WORK_DIR}"
+mkdir -p "${OUT_DIR}"
+
+# --- فعال‌سازی venv ---
+if [ -f "${VENV_DIR}/bin/activate" ]; then
+    # shellcheck disable=SC1091
+    source "${VENV_DIR}/bin/activate"
+else
+    c_red "[!] venv پیدا نشد."
+    exit 1
+fi
+
+# --- حالت API ---
+if [ "$1" == "--api" ]; then
+    c_cyan ">>> اجرای سرور API روی http://127.0.0.1:5000"
+    exec python apz_api.py
+fi
+
+# --- حالت دسته‌ای ---
+if [ "$1" == "--batch" ]; then
+    if [ -z "$2" ]; then
+        c_red "Usage: run_android.sh --batch list.txt"
+        exit 1
+    fi
+    OUT="${OUT_DIR}/batch_$(date +%Y%m%d_%H%M%S).json"
+    c_cyan ">>> تحلیل دسته‌ای: $2"
+    python apz_manager.py --batch "$2" --output "${OUT}" --db
+    c_green "[+] گزارش: ${OUT}"
+    exit 0
+fi
+
+# --- حالت تک‌فایل ---
+APK_PATH="$1"
+if [ -z "${APK_PATH}" ]; then
+    echo "Usage:"
+    echo "  bash run_android.sh /sdcard/Download/app.apk"
+    echo "  bash run_android.sh /sdcard/Download/app.apk --db"
+    echo "  bash run_android.sh --batch list.txt"
+    echo "  bash run_android.sh --api"
+    exit 1
+fi
+
+if [ ! -f "${APK_PATH}" ]; then
+    c_red "[!] فایل پیدا نشد: ${APK_PATH}"
+    exit 1
+fi
+
+BASENAME=$(basename "${APK_PATH}" .apk)
+OUT="${OUT_DIR}/${BASENAME}_$(date +%Y%m%d_%H%M%S).json"
+
+c_cyan ">>> تحلیل APK: ${APK_PATH}"
+c_cyan ">>> خروجی: ${OUT}"
+
+python apz_manager.py --file "${APK_PATH}" --output "${OUT}" --db "$@"
+
+c_green "[+] تحلیل کامل شد."
+echo "    گزارش JSON: ${OUT}"
+
+# HTML در صورت وجود
+HTML_OUT="${OUT%.json}.html"
+if [ -f "${HTML_OUT}" ]; then
+    echo "    گزارش HTML: ${HTML_OUT}"
+    # اعلان در Termux:API (اختیاری)
+    if command -v termux-notification >/dev/null 2>&1; then
+        termux-notification \
+            --title "APZ Manager" \
+            --content "تحلیل $(basename "$APK_PATH") کامل شد." \
+            || true
+    fi
+fi
+```
+
+---
+
+۵) report_generator_patch.py — نسخه‌ی سازگار با اندروید
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+report_generator_patch.py
+------------------------------------------------------------
+نسخه‌ی سازگار با اندروید از report_generator.
+
+ویژگی‌ها:
+- به‌طور خودکار weasyprint را (در صورت نبود) غیرفعال می‌کند.
+- خروجی HTML تمیز و قابل چاپ در مرورگر اندروید.
+- در Ubuntu proot اگر weasyprint نصب باشد، PDF هم تولید می‌شود.
+- بدون وابستگی به Tkinter یا X11.
+
+قابل جایگزینی مستقیم با report_generator.py
+------------------------------------------------------------
+"""
+from __future__ import annotations
+
+import json
+import os
+import platform
+from datetime import datetime
+from typing import Any, Dict, List, Optional
+
+# --- تشخیص پشتیبانی PDF ---
+PDF_SUPPORTED = False
+HTML_CLASS = None
+try:
+    from weasyprint import HTML as HTML_CLASS  # type: ignore
+    PDF_SUPPORTED = True
+except Exception:
+    PDF_SUPPORTED = False
+
+IS_ANDROID = ("ANDROID_ROOT" in os.environ) or ("com.termux" in os.environ.get("PREFIX", ""))
+
+
+def _safe_get(d: Dict[str, Any], *keys, default=None):
+    cur = d
+    for k in keys:
+        if not isinstance(cur, dict) or k not in cur:
+            return default
+        cur = cur[k]
+    return cur
+
+
+def _risk_color(level: str) -> str:
+    return {
+        "CRITICAL": "#8b0000",
+        "HIGH":     "#d9534f",
+        "MEDIUM":   "#f0ad4e",
+        "LOW":      "#5bc0de",
+        "CLEAN":    "#5cb85c",
+        "UNKNOWN":  "#777777",
+    }.get((level or "").upper(), "#777777")
+
+
+def _findings_to_rows(findings: List[Dict[str, Any]]) -> str:
+    if not findings:
+        return "<tr><td colspan='4' style='text-align:center;color:#888;'>یافته‌ای ثبت نشده است.</td></tr>"
+    rows = []
+    for f in findings:
+        title = f.get("title_fa") or f.get("title") or "-"
+        weight = f.get("weight", 0)
+        detail = f.get("detail_fa") or f.get("detail") or ""
+        evidence = f.get("evidence") or []
+        if isinstance(evidence, list):
+            evidence = "<br>".join(f"<code>{e}</code>" for e in evidence)
+        rows.append(
+            f"<tr><td><b>{title}</b></td>"
+            f"<td style='text-align:center;'>{weight}</td>"
+            f"<td>{detail}</td>"
+            f"<td>{evidence}</td></tr>"
+        )
+    return "\n".join(rows)
+
+
+def _list_to_html(items: Optional[List[Any]], empty_msg="—") -> str:
+    if not items:
+        return f"<span style='color:#888;'>{empty_msg}</span>"
+    if isinstance(items, (str, bytes)):
+        return f"<code>{items}</code>"
+    return "<ul>" + "".join(f"<li><code>{i}</code></li>" for i in items) + "</ul>"
+
+
+class ReportGenerator:
+    """تولید گزارش HTML/PDF/JSON با پشتیبانی از اندروید."""
+
+    def __init__(self, report: Dict[str, Any]):
+        self.report = report or {}
+        self.file = self.report.get("file", "unknown.apk")
+        self.sha256 = self.report.get("sha256", "-")
+        self.risk_score = self.report.get("risk_score", 0)
+        self.risk_level = self.report.get("risk_level", "UNKNOWN")
+        self.confidence = self.report.get("confidence", 0)
+        self.sandbox_verdict = self.report.get("sandbox_verdict", "-")
+        self.findings = self.report.get("findings", []) or []
+        self.permissions = self.report.get("permissions", []) or []
+        self.limitations = self.report.get("limitations", []) or []
+        self.iocs = self.report.get("iocs", {}) or {}
+        self.mitre = self.report.get("mitre", []) or []
+        self.recommendations = self.report.get("recommendations", []) or []
+
+    # ------------------------------------------------------------------
+    def render_html(self) -> str:
+        color = _risk_color(self.risk_level)
+        rows = _findings_to_rows(self.findings)
+        mitre_html = ", ".join(
+            f"<code>{m.get('id', m) if isinstance(m, dict) else m}</code>"
+            for m in self.mitre
+        ) or "—"
+
+        iocs_html = "<br>".join(
+            f"<b>{k}</b>: {_list_to_html(v)}" for k, v in self.iocs.items()
+        ) or "—"
+
+        pdf_note = (
+            "<span style='color:#5cb85c;'>PDF فعال است</span>"
+            if PDF_SUPPORTED else
+            "<span style='color:#f0ad4e;'>PDF غیرفعال (weasyprint نصب نیست)</span>"
+        )
+
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        return f"""<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>APZ Report – {self.file}</title>
+<style>
+    body {{ font-family: Tahoma, Arial, sans-serif; background:#f7f7f9; margin:0; padding:16px; color:#222; }}
+    .card {{ background:#fff; border-radius:10px; padding:16px; box-shadow:0 1px 4px rgba(0,0,0,.08); margin-bottom:16px; }}
+    h1 {{ font-size:18px; margin:0 0 8px; }}
+    h2 {{ font-size:16px; margin:16px 0 8px; border-right:4px solid {color}; padding-right:8px; }}
+    .score {{ display:flex; gap:16px; align-items:center; flex-wrap:wrap; }}
+    .score .val {{ font-size:38px; font-weight:bold; color:{color}; }}
+    .badge {{ display:inline-block; padding:4px 10px; border-radius:20px; color:#fff; background:{color}; font-weight:bold; }}
+    table {{ width:100%; border-collapse:collapse; font-size:13px; }}
+    th, td {{ padding:8px; border-bottom:1px solid #eee; vertical-align:top; text-align:right; }}
+    th {{ background:#fafafa; }}
+    code {{ background:#f2f2f2; padding:1px 4px; border-radius:4px; font-size:12px; word-break:break-all; }}
+    .meta {{ font-size:12px; color:#666; }}
+    .footer {{ text-align:center; color:#888; font-size:11px; margin-top:20px; }}
+    ul {{ padding-right:18px; }}
+</style>
+</head>
+<body>
+    <div class="card">
+        <h1>📦 گزارش تحلیل امنیتی APZ Manager</h1>
+        <div class="meta">فایل: <code>{self.file}</code></div>
+        <div class="meta">SHA-256: <code>{self.sha256}</code></div>
+        <div class="meta">تاریخ: {now} | پلتفرم: {platform.system()} {platform.release()}</div>
+        <div class="meta">وضعیت PDF: {pdf_note}</div>
+    </div>
+
+    <div class="card">
+        <h2>🎯 خلاصه‌ی ریسک</h2>
+        <div class="score">
+            <div class="val">{self.risk_score}</div>
+            <div>
+                <div class="badge">{self.risk_level}</div>
+                <div style="margin-top:6px;">اطمینان: <b>{self.confidence}%</b></div>
+                <div>Sandbox: <b>{self.sandbox_verdict}</b></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="card">
+        <h2>🔍 یافته‌ها</h2>
+        <table>
+            <thead>
+                <tr><th>عنوان</th><th>وزن</th><th>توضیح</th><th>شواهد</th></tr>
+            </thead>
+            <tbody>
+                {rows}
+            </tbody>
+        </table>
+    </div>
+
+    <div class="card">
+        <h2>🔐 مجوزها</h2>
+        {_list_to_html(self.permissions, "مجوز خاصی استخراج نشد.")}
+    </div>
+
+    <div class="card">
+        <h2>🌐 IOCها</h2>
+        {iocs_html}
+    </div>
+
+    <div class="card">
+        <h2>🎯 MITRE ATT&CK</h2>
+        {mitre_html}
+    </div>
+
+    <div class="card">
+        <h2>✅ توصیه‌ها</h2>
+        {_list_to_html(self.recommendations, "توصیه‌ای ثبت نشده.")}
+    </div>
+
+    <div class="card">
+        <h2>⚠️ محدودیت‌ها</h2>
+        {_list_to_html(self.limitations, "—")}
+    </div>
+
+    <div class="footer">
+        APZ Manager – گزارش خودکار | {now}
+    </div>
+</body>
+</html>"""
+
+    # ------------------------------------------------------------------
+    def save_html(self, path: str) -> str:
+        html = self.render_html()
+        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(html)
+        return path
+
+    # ------------------------------------------------------------------
+    def save_pdf(self, path: str) -> Optional[str]:
+        if not PDF_SUPPORTED or HTML_CLASS is None:
+            print("[!] PDF غیرفعال است (weasyprint موجود نیست).")
+            return None
+        html_path = path.rsplit(".", 1)[0] + ".html"
+        self.save_html(html_path)
+        HTML_CLASS(filename=html_path).write_pdf(path)
+        return path
+
+    # ------------------------------------------------------------------
+    def save_json(self, path: str) -> str:
+        os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(self.report, f, ensure_ascii=False, indent=2)
+        return path
+
+    # ------------------------------------------------------------------
+    def save_all(self, base_path: str) -> Dict[str, Optional[str]]:
+        """base_path مثل: /home/apz-reports/app.json"""
+        base = base_path.rsplit(".", 1)[0]
+        return {
+            "json": self.save_json(base + ".json"),
+            "html": self.save_html(base + ".html"),
+            "pdf":  self.save_pdf(base + ".pdf"),
+        }
+
+
+# ----------------------------------------------------------------------
+# توابع سازگار با کدهای قدیمی (اگر پروژه از توابع ماژولی استفاده می‌کند)
+# ----------------------------------------------------------------------
+def generate_html_report(report: Dict[str, Any], output_path: str) -> str:
+    return ReportGenerator(report).save_html(output_path)
+
+
+def generate_pdf_report(report: Dict[str, Any], output_path: str) -> Optional[str]:
+    return ReportGenerator(report).save_pdf(output_path)
+
+
+def generate_json_report(report: Dict[str, Any], output_path: str) -> str:
+    return ReportGenerator(report).save_json(output_path)
+
+
+if __name__ == "__main__":
+    print(f"[i] PDF Supported: {PDF_SUPPORTED}")
+    print(f"[i] Running on Android: {IS_ANDROID}")
+    demo = {
+        "file": "demo.apk",
+        "sha256": "a" * 64,
+        "risk_score": 78,
+        "risk_level": "HIGH",
+        "confidence": 88,
+        "sandbox_verdict": "suspicious",
+        "findings": [
+            {"title_fa": "مجوزهای حساس", "weight": 35,
+             "detail_fa": "مجوزهای خطرناک شناسایی شد.",
+             "evidence": ["android.permission.READ_SMS"]}
+        ],
+        "permissions": ["android.permission.READ_SMS", "android.permission.CAMERA"],
+        "limitations": ["تحلیل static/heuristic است."],
+        "recommendations": ["عدم اجرای اپ روی دستگاه اصلی."],
+    }
+    g = ReportGenerator(demo)
+    out = g.save_all("./demo_report.json")
+    print("[+] خروجی‌ها:", out)
+```
+
+---
+
+۶) patch_apz_manager.py — پچ خودکار فایل اصلی
+
+```python
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+patch_apz_manager.py
+------------------------------------------------------------
+پچ خودکار apz_manager.py برای سازگاری با اندروید/Termux:
+- غیرفعال‌کردن Tkinter در صورت نبود DISPLAY
+- حذف وابستگی سخت به weasyprint
+- افزودن مسیر پیش‌فرض خروجی در ~/apz-reports
+------------------------------------------------------------
+"""
+from __future__ import annotations
+
+import os
+import re
+import shutil
+from pathlib import Path
+
+TARGETS = ["apz_manager.py", "apz_api.py", "apz_orchestrator.py"]
+BACKUP_SUFFIX = ".android.bak"
+
+
+def is_android() -> bool:
+    return ("ANDROID_ROOT" in os.environ) or ("com.termux" in os.environ.get("PREFIX", ""))
+
+
+def backup(path: Path) -> None:
+    bak = path.with_suffix(path.suffix + BACKUP_SUFFIX)
+    if not bak.exists():
+        shutil.copy2(path, bak)
+        print(f"[+] بکاپ: {bak}")
+
+
+def patch_tkinter_guard(path: Path) -> bool:
+    """اگر tkinter موجود نیست، import آن را در try/except قرار می‌دهد."""
+    src = path.read_text(encoding="utf-8")
+    if "TKINTER_AVAILABLE" in src:
+        return False
+
+    # جایگزین import tkinter
+    pattern = re.compile(
+        r"^(import tkinter.*|from tkinter import .*)$",
+        re.MULTILINE,
+    )
+
+    if not pattern.search(src):
+        return False
+
+    def _wrap(match: re.Match) -> str:
+        line = match.group(0)
+        return (
+            "try:\n"
+            f"    {line}\n"
+            "    TKINTER_AVAILABLE = True\n"
+            "except Exception:\n"
+            "    TKINTER_AVAILABLE = False\n"
+        )
+
+    # فقط اولین بلوک import را wrap کن
+    new_src, count = pattern.subn(_wrap, src, count=1)
+    if count:
+        path.write_text(new_src, encoding="utf-8")
+        print(f"[+] tkinter guard اعمال شد: {path.name}")
+        return True
+    return False
+
+
+def patch_weasyprint(path: Path) -> bool:
+    """هر import سخت weasyprint را در try/except قرار می‌دهد."""
+    src = path.read_text(encoding="utf-8")
+    if "WEASYPRINT_AVAILABLE" in src:
+        return False
+
+    pattern = re.compile(r"^(from weasyprint import .+|import weasyprint.*)$", re.MULTILINE)
+    if not pattern.search(src):
+        return False
+
+    def _wrap(match: re.Match) -> str:
+        line = match.group(0)
+        return (
+            "try:\n"
+            f"    {line}\n"
+            "    WEASYPRINT_AVAILABLE = True\n"
+            "except Exception:\n"
+            "    WEASYPRINT_AVAILABLE = False\n"
+        )
+
+    new_src, count = pattern.subn(_wrap, src, count=1)
+    if count:
+        path.write_text(new_src, encoding="utf-8")
+        print(f"[+] weasyprint guard اعمال شد: {path.name}")
+        return True
+    return False
+
+
+def patch_default_outdir(path: Path) -> bool:
+    """افزودن مسیر پیش‌فرض برای خروجی‌ها (اگر نبود)."""
+    src = path.read_text(encoding="utf-8")
+    if "APZ_DEFAULT_OUTDIR" in src:
+        return False
+
+    inject = (
+        "\n# --- APZ Android Patch ---\n"
+        "import pathlib as _apz_pl\n"
+        "APZ_DEFAULT_OUTDIR = _apz_pl.Path.home() / 'apz-reports'\n"
+        "APZ_DEFAULT_OUTDIR.mkdir(parents=True, exist_ok=True)\n"
+        "# --- End APZ Patch ---\n\n"
+    )
+
+    # بعد از بلوک importها اضافه کن (بعد از آخرین import در ۳۰ خط اول)
+    lines = src.splitlines(keepends=True)
+    insert_at = 0
+    for i, line in enumerate(lines[:60]):
+        if line.startswith(("import ", "from ")) or line.strip() == "":
+            insert_at = i + 1
+        else:
+            break
+
+    new_src = "".join(lines[:insert_at]) + inject + "".join(lines[insert_at:])
+    path.write_text(new_src, encoding="utf-8")
+    print(f"[+] APZ_DEFAULT_OUTDIR اضافه شد: {path.name}")
+    return True
+
+
+def main() -> None:
+    root = Path(__file__).resolve().parent
+    print(f"[i] شاخه پروژه: {root}")
+    print(f"[i] اندروید تشخیص داده شد: {is_android()}")
+
+    changed_any = False
+    for name in TARGETS:
+        p = root / name
+        if not p.exists():
+            print(f"[=] {name} موجود نیست، رد می‌شود.")
+            continue
+        backup(p)
+        c1 = patch_tkinter_guard(p)
+        c2 = patch_weasyprint(p)
+        c3 = patch_default_outdir(p)
+        changed_any = changed_any or c1 or c2 or c3
+
+    if changed_any:
+        print("\n✅ پچ‌ها اعمال شد. بکاپ‌ها با پسوند .android.bak ذخیره شدند.")
+    else:
+        print("\n[=] تغییری لازم نبود.")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+---
+
+۷) .env.android.example — نمونه‌ی متغیرهای محیطی
+
+```bash
+# ============================================================
+#  APZ Manager – Android .env example
+#  کپی کنید به:  ~/.apz.env  و مقادیر را پر کنید
+#  سپس در ~/.bashrc اضافه کنید:
+#      [ -f ~/.apz.env ] && set -a && . ~/.apz.env && set +a
+# ============================================================
+
+# --- VirusTotal ---
+APZ_VT_API_KEY=""
+
+# --- Hybrid Analysis ---
+APZ_HA_API_KEY=""
+
+# --- MetaDefender Cloud ---
+APZ_MD_API_KEY=""
+
+# --- OpenAI (اختیاری، برای AI Assistant) ---
+APZ_AI_API_KEY=""
+
+# --- تنظیمات APZ ---
+APZ_DEFAULT_OUTDIR="$HOME/apz-reports"
+APZ_DB_PATH="$HOME/apz-reports/apz.db"
+APZ_LOG_LEVEL="INFO"
+APZ_TIMEOUT=30
+```
+
+---
+
+۸) README_ANDROID.md — راهنمای خلاصه‌ی اندروید
+
+```markdown
+# 📱 APZ Manager روی اندروید
+
+## 🚀 نصب سریع (Termux native)
+
+```bash
+# 1) نصب Termux از F-Droid
+#    https://f-droid.org/packages/com.termux/
+
+# 2) دریافت فایل‌های این پکیج روی گوشی و اجرا:
+pkg install -y git
+git clone <your-repo>
+cd apz-android
+bash apz_android.sh
+```
+
+🧠 نصب کامل (با PDF) – Ubuntu proot
+
+```bash
+bash setup_proot.sh
+proot-distro login ubuntu
+cd /root/apz-manager && source venv/bin/activate
+python apz_manager.py --file /root/sample.apk --output /root/out.json --db
+```
+
+▶️ اجرای تحلیل
+
+```bash
+termux-setup-storage         # فقط بار اول
+bash ~/apz-manager/run_android.sh /sdcard/Download/app.apk
+```
+
+🌐 اجرای API
+
+```bash
+bash ~/apz-manager/run_android.sh --api
+# سپس در مرورگر گوشی: http://127.0.0.1:5000/stats
+```
+
+📂 محل گزارش‌ها
+
+```
+~/apz-reports/
+  ├── app_20260101_120000.json
+  ├── app_20260101_120000.html
+  └── apz.db
+```
+
+⚙️ کلیدهای API
+
+```bash
+cp .env.android.example ~/.apz.env
+nano ~/.apz.env
+# سپس در ~/.bashrc:
+echo '[ -f ~/.apz.env ] && set -a && . ~/.apz.env && set +a' >> ~/.bashrc
+source ~/.bashrc
+```
+
+🩺 عیب‌یابی
+
+مشکل راه‌حل
+ModuleNotFoundError: yara pkg install libyara-dev سپس pip install yara-python --no-cache-dir
+خطای weasyprint از Ubuntu proot استفاده کنید یا PDF را نادیده بگیرید
+Tkinter پیدا نمی‌شود طبیعی است – از CLI/API استفاده کنید
+دسترسی به /sdcard termux-setup-storage را اجرا کنید و مجوز بدهید
+کندی تحلیل APK بزرگ APK را به ~/samples منتقل کنید (حافظه داخلی سریع‌تر از sdcard)
+
+🔐 نکات امنیتی
+
+· APKها را هرگز روی گوشی اصلی اجرا نکنید.
+· گزارش‌ها را در یک پوشه‌ی رمزگذاری‌شده نگه دارید.
+· کلیدهای API را در Git commit نکنید.
+
+📜 مجوز
+
+GPLv3 – همانند پروژه‌ی اصلی.
+
+```
+
+---
+
+## 🔧 دستور نصب یک‌خطی (خلاصه)
+
+پس از کپی همه‌ی فایل‌ها در یک پوشه، فقط این را اجرا کنید:
+
+```bash
+# داخل Termux
+pkg install -y git
+cd ~/apz-android      # پوشه‌ای که فایل‌های بالا داخلش است
+chmod +x apz_android.sh setup_proot.sh run_android.sh
+bash apz_android.sh
+```
+
+و برای اجرا:
+
+```bash
+bash ~/apz-manager/run_android.sh /sdcard/Download/sample.apk
+```
+
+---
+
+📋 چک‌لیست پس از نصب
+
+☐ pkg update && pkg upgrade بدون خطا اجرا شد
+☐ termux-setup-storage انجام شد
+☐ python -c "import androguard, yara" بدون خطا بود
+☐ فایل ~/apz-manager/venv ساخته شد
+☐ یک APK نمونه با موفقیت تحلیل شد
+☐ گزارش در ~/apz-reports/*.json تولید شد
+☐ (اختیاری) API روی http://127.0.0.1:5000/stats پاسخ داد
+
+---

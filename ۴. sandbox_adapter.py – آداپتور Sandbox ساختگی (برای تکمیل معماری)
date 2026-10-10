@@ -1,0 +1,56 @@
+"""
+آداپتور Sandbox پویا – این نسخه صرفاً شبیه‌سازی است و فایلی اجرا نمی‌کند.
+برای محیط تولید، این بخش باید به یک سرویس ایزوله متصل شود.
+"""
+
+import json
+import random
+from pathlib import Path
+from dataclasses import dataclass, asdict
+from datetime import datetime
+
+@dataclass
+class SandboxResult:
+    status: str          # 'complete', 'error', 'timeout'
+    verdict: str         # 'malicious', 'suspicious', 'benign', 'unknown'
+    events: list
+    logcat: list
+    network_connections: list
+    files_written: list
+    permissions_used: list
+    timestamp: str
+
+class SandboxAdapter:
+    def __init__(self, config: dict = None):
+        self.config = config or {}
+        self._simulate = self.config.get('simulate', True)
+
+    def submit(self, apk_path: str) -> SandboxResult:
+        """
+        ارسال APK به Sandbox (در این نسخه شبیه‌سازی)
+        """
+        if not self._simulate:
+            raise NotImplementedError("اتصال به Sandbox واقعی پیکربندی نشده است.")
+
+        # شبیه‌سازی داده‌های تصادفی
+        verdicts = ['benign', 'suspicious', 'malicious']
+        weights = [0.4, 0.4, 0.2]
+        verdict = random.choices(verdicts, weights=weights)[0]
+
+        events = [
+            {"type": "network", "dest": "192.168.1.1", "port": 443, "protocol": "TLS"},
+            {"type": "file", "path": "/data/data/com.example/cache/temp.dat", "size": 1024},
+        ]
+        if verdict == 'malicious':
+            events.append({"type": "process", "cmd": "sh -c 'rm -rf /sdcard/*'"})
+
+        return SandboxResult(
+            status='complete',
+            verdict=verdict,
+            events=events,
+            logcat=["I/ActivityManager: Starting activity", "W/System: ..."],
+            network_connections=["192.168.1.1:443", "8.8.8.8:53"],
+            files_written=["/data/data/com.example/cache/temp.dat"],
+            permissions_used=["READ_PHONE_STATE", "INTERNET"],
+            timestamp=datetime.now().isoformat()
+        )

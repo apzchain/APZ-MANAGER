@@ -1,0 +1,21 @@
+fastlane/metadata/android/
+├── en-US/
+│   ├── short_description.txt        ← حداکثر ۸۰ کاراکتر، بدون نقطه انتهایی
+│   ├── full_description.txt         ← حداکثر ۴۰۰۰ کاراکتر
+│   ├── changelogs/
+│   │   └── 1.txt                    ← برای versionCode=1 (حداکثر ۵۰۰ کاراکتر)
+│   └── images/
+│       ├── icon.png                 ← ۵۱۲×۵۱۲ پیکسل
+│       └── phoneScreenshots/
+│           ├── 1.png                ← اسکرین‌شات
+│           └── 2.png                ← حداقل ۲ اسکرین‌شات
+└── fa-IR/
+    ├── short_description.txt
+    ├── full_description.txt
+    ├── changelogs/
+    │   └── 1.txt
+    └── images/
+        ├── icon.png
+        └── phoneScreenshots/
+            ├── 1.png
+            └── 2.png
