@@ -1,0 +1,35 @@
+rule Android_Accessibility_Abuse {
+    meta:
+        severity = "critical"
+        description = "دسترسی به AccessibilityService برای کنترل UI"
+    strings:
+        $a = "AccessibilityService"
+        $b = "performGlobalAction"
+        $c = "findAccessibilityNodeInfosByText"
+    condition:
+        $a and ($b or $c)
+}
+
+rule Android_SMS_Interception {
+    meta:
+        severity = "high"
+        description = "شنود یا رهگیری پیامک"
+    strings:
+        $s = "SmsManager"
+        $r = "SmsReceiver"
+        $b = "BroadcastReceiver"
+    condition:
+        ($s or $r) and $b
+}
+
+rule Android_File_Ransom {
+    meta:
+        severity = "critical"
+        description = "الگوهای مرتبط با باج‌افزار"
+    strings:
+        $ext = ".encrypted"
+        $note = "README.txt"
+        $lock = "lock"
+    condition:
+        ($ext or $lock) and $note
+}

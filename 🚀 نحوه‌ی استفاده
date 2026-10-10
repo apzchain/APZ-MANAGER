@@ -1,0 +1,72 @@
+A. حالت رابط کاربری گرافیکی (GUI)
+
+```bash
+python apz_manager.py
+```
+
+· دکمه‌ی انتخاب و تحلیل APK را بزنید.
+· پیشرفت تحلیل را در Progress Bar مشاهده کنید.
+· یافته‌ها در درخت‌واره و گزارش کامل در بخش متنی نمایش داده می‌شود.
+· با دکمه‌های ذخیره گزارش، AI Assistant، Multi-Reputation و Threat Platform از قابلیت‌های بیشتر استفاده کنید.
+
+---
+
+B. حالت خط فرمان (CLI)
+
+تحلیل یک فایل:
+
+```bash
+python apz_manager.py --file malware.apk --output result.json --db
+```
+
+· --file: مسیر APK
+· --output: مسیر ذخیره‌ی گزارش JSON
+· --db: ذخیره‌سازی در دیتابیس
+
+تحلیل دسته‌ای:
+
+```bash
+python apz_manager.py --batch list.txt --output batch_results.json
+```
+
+فایل list.txt شامل مسیر هر APK در یک خط است.
+
+---
+
+C. استفاده از Orchestrator در کد
+
+```python
+from apz_orchestrator import APZOrchestrator
+
+orch = APZOrchestrator()
+report = orch.analyze_single('app.apk', source='my_script')
+summary = orch.generate_summary(['sha1', 'sha2'])
+print(summary)
+```
+
+---
+
+D. سرور API (RESTful)
+
+اجرای سرور:
+
+```bash
+python apz_api.py
+```
+
+سپس درخواست POST به آدرس http://localhost:5000/analyze با JSON زیر بفرستید:
+
+```json
+{"apk_path": "/path/to/app.apk"}
+```
+
+پاسخ، گزارش کامل تحلیل خواهد بود.
+
+دیگر Endpointها:
+
+· POST /batch – تحلیل دسته‌ای
+· GET /summary/<sha256> – خلاصه‌ی یک SHA خاص
+· GET /stats – آمار کلی تحلیل‌ها
+
+---
+

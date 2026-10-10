@@ -1,0 +1,52 @@
+۱. کلون کردن ریپازیتوری
+
+```bash
+git clone https://github.com/your-org/apz-manager.git
+cd apz-manager
+```
+
+۲. ایجاد محیط مجازی (توصیه‌شده)
+
+```bash
+python -m venv venv
+source venv/bin/activate      # Linux/macOS
+venv\Scripts\activate         # Windows
+```
+
+۳. نصب وابستگی‌ها
+
+```bash
+pip install -r requirements.txt
+```
+
+فایل requirements.txt شامل:
+
+```
+androguard>=3.4.0
+pyyaml>=6.0
+weasyprint>=60.0   # اختیاری برای PDF
+flask>=2.0         # برای API
+sqlalchemy>=1.4    # برای دیتابیس
+```
+
+۴. تنظیم کلیدهای API (اختیاری)
+
+برای استفاده از اعتبارسنجی چندمنبعی و AI Assistant، متغیرهای محیطی را تنظیم کنید:
+
+```bash
+# Windows (با setx)
+setx APZ_VT_API_KEY "your_vt_key"
+setx APZ_HA_API_KEY "your_ha_key"
+setx APZ_MD_API_KEY "your_md_key"
+setx APZ_AI_API_KEY "your_openai_key"
+
+# Linux/macOS (در ~/.bashrc یا ~/.zshrc)
+export APZ_VT_API_KEY="your_vt_key"
+export APZ_HA_API_KEY="your_ha_key"
+export APZ_MD_API_KEY="your_md_key"
+export APZ_AI_API_KEY="your_openai_key"
+```
+
+برای راحتی، اسکریپت set_reputation_keys.bat در ویندوز موجود است.
+
+---

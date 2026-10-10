@@ -1,0 +1,17 @@
+# تنظیمات APZ Manager
+sandbox:
+  simulate: true          # در حالت تولید، false کنید و به سرویس واقعی متصل شوید
+  endpoint: "https://sandbox.example.com/submit"
+  api_key: ""
+
+yara_rules_dir: "rules"
+
+reputation:
+  vt_enabled: true
+  ha_enabled: true
+  md_enabled: true
+  local_ioc_db: "~/.apz_manager/iocs.csv"
+
+logging:
+  level: "INFO"
+  file: "apz.log"

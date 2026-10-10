@@ -1,0 +1,23 @@
+APZ-Manager/
+├── apz_manager.py          # رابط کاربری اصلی (به‌روز شده)
+├── reputation_engine.py    # موتور اعتبارسنجی (بدون تغییر)
+├── threat_platform.py      # لایه تحلیل تهدید (به‌روز شده با YARA پیشرفته)
+├── risk_fusion_engine.py   # موتور فیوژن (بدون تغییر)
+├── axml_parser.py          # جدید: دیکودر AndroidManifest.xml
+├── sandbox_adapter.py      # جدید: آداپتور Sandbox ساختگی
+├── report_generator.py     # جدید: تولید گزارش HTML/PDF
+├── logger.py               # جدید: مدیریت لاگ‌ها
+├── config.yaml             # جدید: تنظیمات مرکزی
+├── requirements.txt        # به‌روز شده با کتابخانه‌های جدید
+├── build_windows.bat       # اسکریپت ساخت (به‌روز شده)
+├── run_windows.bat         # اجرا (بدون تغییر)
+├── set_reputation_keys.bat # تنظیم کلیدها (بدون تغییر)
+├── rules/                  # جدید: پوشه برای قوانین YARA خارجی
+│   └── android_rules.yar   # نمونه قوانین
+├── docs/                   # جدید: مستندات تکمیلی
+│   ├── USER_GUIDE.md
+│   └── API_REFERENCE.md
+└── tests/                  # جدید: تست‌های واحد
+    ├── test_axml.py
+    ├── test_fusion.py
+    └── test_yara.py

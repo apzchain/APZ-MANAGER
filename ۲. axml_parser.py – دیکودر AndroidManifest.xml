@@ -1,0 +1,55 @@
+"""
+دیکودر AndroidManifest.xml با استفاده از androguard
+"""
+
+import zipfile
+from androguard.core.bytecodes.apk import APK
+
+def extract_permissions_and_components(apk_path: str) -> dict:
+    """
+    استخراج مجوزها، فعالیت‌ها، سرویس‌ها و کامپوننت‌های exported از APK
+    """
+    try:
+        apk = APK(apk_path)
+        permissions = apk.get_permissions()
+        activities = apk.get_activities()
+        services = apk.get_services()
+        receivers = apk.get_receivers()
+        providers = apk.get_providers()
+
+        dangerous_perms = []
+        exported_components = []
+        for perm in permissions:
+            # تشخیص مجوزهای خطرناک بر اساس سطح حفاظت
+            if apk.get_permission_details(perm).get('protection_level') == 'dangerous':
+                dangerous_perms.append(perm)
+
+        for act in activities:
+            if apk.get_activity_details(act).get('exported', False):
+                exported_components.append(('activity', act))
+        for srv in services:
+            if apk.get_service_details(srv).get('exported', False):
+                exported_components.append(('service', srv))
+        for rcv in receivers:
+            if apk.get_receiver_details(rcv).get('exported', False):
+                exported_components.append(('receiver', rcv))
+        for prv in providers:
+            if apk.get_provider_details(prv).get('exported', False):
+                exported_components.append(('provider', prv))
+
+        return {
+            'permissions': permissions,
+            'dangerous_permissions': dangerous_perms,
+            'activities': activities,
+            'services': services,
+            'receivers': receivers,
+            'providers': providers,
+            'exported_components': exported_components,
+            'package_name': apk.get_package(),
+            'version_name': apk.get_androidversion_name(),
+            'version_code': apk.get_androidversion_code(),
+            'min_sdk': apk.get_min_sdk_version(),
+            'target_sdk': apk.get_target_sdk_version(),
+        }
+    except Exception as e:
+        raise RuntimeError(f"خطا در دیکود مانیفست: {e}")

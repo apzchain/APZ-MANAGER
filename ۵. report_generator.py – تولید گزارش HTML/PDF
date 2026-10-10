@@ -1,0 +1,60 @@
+"""
+تولید گزارش‌های زیبا از نتایج تحلیل
+"""
+
+import json
+from pathlib import Path
+from datetime import datetime
+
+class ReportGenerator:
+    @staticmethod
+    def generate_html(report_data: dict, output_path: str):
+        html = f"""
+        <!DOCTYPE html>
+        <html dir="rtl" lang="fa">
+        <head><meta charset="UTF-8"><title>گزارش امنیتی APZ</title>
+        <style>
+            body {{ font-family: Tahoma, sans-serif; background: #f4f4f4; padding: 20px; }}
+            .container {{ max-width: 900px; margin: auto; background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 10px rgba(0,0,0,0.1); }}
+            .score {{ font-size: 32px; font-weight: bold; }}
+            .level-{{ report_data.get('risk_level', 'low').lower() }} {{ color: #c0392b; }}
+            .evidence {{ background: #ecf0f1; padding: 10px; margin: 8px 0; border-radius: 6px; }}
+            .badge {{ display: inline-block; padding: 4px 12px; border-radius: 20px; color: white; }}
+            .badge-critical {{ background: #e74c3c; }}
+            .badge-high {{ background: #e67e22; }}
+            .badge-medium {{ background: #f1c40f; }}
+            .badge-low {{ background: #2ecc71; }}
+        </style>
+        </head>
+        <body>
+        <div class="container">
+            <h1>📋 گزارش تحلیل امنیتی APK</h1>
+            <p><strong>فایل:</strong> {report_data.get('file', 'نامشخص')}</p>
+            <p><strong>SHA-256:</strong> {report_data.get('sha256', '')}</p>
+            <p><strong>زمان:</strong> {datetime.now().strftime('%Y-%m-%d %H:%M')}</p>
+            <hr>
+            <div class="score">امتیاز ریسک: <span class="level-{report_data.get('risk_level', 'low').lower()}">{report_data.get('risk_score', 0)}/100</span></div>
+            <div>سطح: <span class="badge badge-{report_data.get('risk_level', 'low').lower()}">{report_data.get('risk_level', 'N/A')}</span></div>
+            <div>اطمینان: {report_data.get('confidence', 0)}%</div>
+            <hr>
+            <h2>یافته‌ها</h2>
+            {''.join(f'<div class="evidence"><strong>{f.get("title_fa")}</strong> (وزن {f.get("weight")})<br>{f.get("detail_fa")}<br>شواهد: {", ".join(f.get("evidence", []))}</div>' for f in report_data.get('findings', []))}
+            <hr>
+            <h2>مجوزهای حساس</h2>
+            <ul>{''.join(f'<li>{p}</li>' for p in report_data.get('permissions', []))}</ul>
+            <hr>
+            <h2>محدودیت‌ها</h2>
+            <ul>{''.join(f'<li>{l}</li>' for l in report_data.get('limitations', []))}</ul>
+        </div>
+        </body>
+        </html>
+        """
+        Path(output_path).write_text(html, encoding='utf-8')
+
+    @staticmethod
+    def generate_pdf(html_path: str, pdf_path: str):
+        try:
+            from weasyprint import HTML
+            HTML(html_path).write_pdf(pdf_path)
+        except ImportError:
+            print("weasyprint نصب نیست؛ PDF تولید نشد.")
