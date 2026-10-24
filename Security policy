@@ -1,0 +1,288 @@
+APZ Manager — Security Policy
+
+Project: APZ Manager
+Repository: https://github.com/apzchain/APZ-MANAGER
+Policy version: 1.0
+Last reviewed: 2026-10-25
+
+1. Security Commitment
+
+APZ Manager is designed to support transparent, user-controlled Android application and package management.
+
+Security, privacy, least privilege, and informed user consent are core project principles. This policy describes how to report vulnerabilities, which components are covered, how reports are handled, and what security practices maintainers intend to follow.
+
+This policy does not constitute a guarantee that the application is free of vulnerabilities or that every security control described here has already been implemented.
+
+2. Supported Versions
+
+Security fixes are prioritized for the latest stable release. A previous release may receive fixes when maintainers explicitly designate it as supported.
+
+Version| Support status| Security updates
+Latest stable release| Supported| Yes
+Previous release explicitly designated as supported| Limited support| As announced
+Development builds and prereleases| Best effort| Not guaranteed
+Unsupported or end-of-life releases| Unsupported| No
+
+The actual supported releases must be confirmed against published GitHub releases. Do not assume that a version is supported solely because it is available in the repository.
+
+Users should upgrade to the latest supported release when a security update becomes available.
+
+3. Reporting a Vulnerability
+
+Do not disclose unpatched security vulnerabilities through public GitHub Issues, Discussions, pull requests, or public social media posts.
+
+Preferred reporting method
+
+1. Open the APZ-MANAGER repository on GitHub.
+2. Navigate to the Security tab.
+3. If private vulnerability reporting is enabled, select Report a vulnerability and submit a private security advisory.
+4. If private reporting is unavailable, contact the repository maintainers privately through a verified contact channel published by the project.
+
+Repository: https://github.com/apzchain/APZ-MANAGER/security
+
+Do not assume that a public issue is a confidential reporting channel. Do not publish sensitive exploit details before coordinating with maintainers.
+
+Information to include
+
+Please provide as much of the following information as possible:
+
+- A concise description of the vulnerability.
+- The affected component, feature, file, or code path.
+- The affected app version, release tag, or commit.
+- Android version and device information, when relevant.
+- Whether the device uses standard permissions, Shizuku, or root access.
+- Reproduction steps and expected versus actual behavior.
+- Security impact and realistic attack prerequisites.
+- A minimal proof of concept, logs, or screenshots, where safe.
+- Suggested mitigations, if known.
+
+Please remove passwords, authentication tokens, private keys, personal data, and unrelated device information from submitted evidence.
+
+Do not include real users' backups, private application data, or other people's information in a proof of concept.
+
+4. Vulnerability Scope
+
+Security reports concerning the APZ Manager source code, official application builds, release process, and security-sensitive integrations are in scope.
+
+4.1 Android application security
+
+Examples include:
+
+- Unauthorized access to application-management functions.
+- Insecure handling of Android permissions or exported components.
+- Intent, deep-link, or IPC vulnerabilities.
+- Improper input validation or unsafe file handling.
+- Path traversal, arbitrary file access, or unsafe archive extraction.
+- Exposure of sensitive information through logs, notifications, temporary files, or shared storage.
+- WebView vulnerabilities, unsafe JavaScript bridges, or insecure network communication, where applicable.
+- Incorrect handling of Android scoped storage or application visibility restrictions.
+
+4.2 APK, XAPK, and package management
+
+Examples include:
+
+- Installing an altered or malicious package because required integrity checks are missing.
+- Trusting unverified package metadata or misleading package names.
+- Unsafe parsing of APK, XAPK, ZIP, or other supported archive formats.
+- Archive traversal, decompression bombs, or resource exhaustion.
+- Insecure installation, update, uninstall, or restore workflows.
+- Bypassing user confirmation for destructive or security-sensitive operations.
+- Failing to distinguish package identity from display name.
+
+Package signatures and signing certificates must be verified or compared when the application's security model requires it. A valid signature alone does not prove that an application is trustworthy.
+
+4.3 Backup and restore security
+
+Examples include:
+
+- Unauthorized access to backup archives.
+- Exposure of application data, credentials, tokens, or personal information.
+- Insecure backup encryption or key management, where encryption is implemented.
+- Restoring files to unintended locations.
+- Unsafe deserialization or archive extraction during restore.
+- Creating backups that unintentionally expose private data to other applications.
+
+Backup and restore operations must respect Android platform restrictions and obtain appropriate user authorization.
+
+4.4 Shizuku and root integrations
+
+Where supported by the actual implementation, reports may include:
+
+- Privilege escalation beyond the authority explicitly granted by the user.
+- Missing authorization checks for privileged operations.
+- Unsafe shell-command construction or command injection.
+- Execution of unintended commands or modification of unintended files.
+- Exposure of privileged service interfaces to unauthorized callers.
+- Failure to distinguish ordinary app privileges from Shizuku- or root-granted privileges.
+- Persistence of privileged access after authorization is revoked.
+
+Privileged operations must be narrowly scoped, validated, auditable, and explicitly authorized. Root access must never be silently assumed or obtained without user consent.
+
+4.5 Network, dependencies, and build pipeline
+
+Examples include:
+
+- Cleartext transmission of sensitive information.
+- Improper TLS certificate validation.
+- Hardcoded secrets or leaked signing credentials.
+- Vulnerable dependencies with an exploitable impact on APZ Manager.
+- Compromised build workflows, release artifacts, or update verification.
+- Unauthorized modification of official release packages.
+- CI/CD permissions that allow untrusted pull requests to access release secrets.
+
+Third-party components are not automatically excluded when a vulnerability creates a demonstrable security impact in APZ Manager. Reports solely concerning an unrelated external service should be directed to its respective maintainer.
+
+5. Out-of-Scope Reports
+
+The following are generally out of scope unless they demonstrate an additional vulnerability in APZ Manager:
+
+- Vulnerabilities requiring an already fully compromised device without an independent application weakness.
+- Issues caused solely by unsupported, modified, or unofficial builds.
+- Feature requests and ordinary bugs without a security impact.
+- Theoretical attacks without a credible attack path.
+- Social engineering unrelated to a vulnerability in the project.
+- Vulnerabilities in unrelated third-party services.
+- Requests to bypass Android security controls without a legitimate, authorized use case.
+
+A report may still be considered if it demonstrates a reproducible security weakness under realistic conditions.
+
+6. Severity and Prioritization
+
+Maintainers should assess reported vulnerabilities using the impact, exploitability, affected privileges, user interaction requirements, and scope of affected data. CVSS may be used as a supporting severity framework.
+
+Severity| Typical examples| Target for initial triage
+Critical| Remote compromise or severe unauthorized privileged access with broad impact| As soon as reasonably possible
+High| Significant privilege escalation, sensitive-data exposure, or release compromise| Within 3 business days
+Medium| Meaningful security weakness with limited prerequisites or impact| Within 5 business days
+Low| Limited-impact weakness or defense-in-depth issue| Within 10 business days
+
+These are triage targets, not guaranteed resolution deadlines. A vulnerability's actual severity depends on its technical details and realistic impact.
+
+7. Response and Disclosure Process
+
+Maintainers aim to follow this process:
+
+1. Acknowledgment: Confirm receipt within 3 business days when reasonably possible.
+2. Triage: Validate the report, assess severity, and identify affected versions.
+3. Coordination: Communicate with the reporter and agree on a reasonable disclosure plan.
+4. Remediation: Develop and review a fix, including regression tests where appropriate.
+5. Release: Publish a patched version and security advisory when appropriate.
+6. Disclosure: Coordinate public disclosure after a fix is available and users have had a reasonable opportunity to update.
+
+Complex vulnerabilities may require additional time. If a report cannot be resolved within the expected timeframe, maintainers should provide a status update when possible.
+
+Do not disclose a reporter's identity or private report contents without permission, except where disclosure is legally required.
+
+8. Secure Development Requirements
+
+The following practices are recommended for implementation and verification in the project.
+
+8.1 Least privilege and user consent
+
+- Request only Android permissions necessary for documented functionality.
+- Explain sensitive operations before execution.
+- Require confirmation for destructive actions.
+- Never silently grant permissions or bypass platform authorization.
+- Treat root and Shizuku access as separate, optional trust boundaries.
+- Fail safely when authorization is denied or unavailable.
+
+8.2 Input and file validation
+
+- Validate file names, paths, archive entries, MIME types, and file sizes.
+- Prevent directory traversal and extraction outside the intended destination.
+- Apply reasonable archive-size and decompression limits.
+- Avoid shell commands constructed from untrusted input.
+- Handle malformed files and exceptions without exposing sensitive information.
+
+8.3 Data protection
+
+- Do not log passwords, access tokens, private keys, or sensitive backup contents.
+- Store sensitive application data using appropriate Android security mechanisms.
+- Encrypt sensitive backups when the product's threat model requires it, and protect encryption keys separately.
+- Avoid unnecessary collection, retention, or transmission of personal data.
+- Ensure temporary files are cleaned up when no longer required.
+- Do not claim that backups are encrypted unless encryption is actually implemented and tested.
+
+8.4 Network and dependency security
+
+- Use HTTPS for network communications involving sensitive data.
+- Do not disable TLS certificate validation to work around connection errors.
+- Pin dependencies to reviewed versions and commit dependency lockfiles where supported.
+- Review dependency vulnerability alerts and update affected components.
+- Never embed production secrets or private signing keys in source code.
+- Treat external data, package metadata, and downloaded files as untrusted input.
+
+8.5 Release integrity
+
+- Restrict release and signing credentials to authorized maintainers and protected workflows.
+- Keep Android signing keys outside the source repository and ordinary build logs.
+- Review changes to build scripts and CI/CD workflows.
+- Build release artifacts from reviewed source code.
+- Publish checksums for official artifacts and consider signing release attestations.
+- Verify package identity and signing continuity during updates where applicable.
+- Investigate unexpected signing-certificate changes before publishing an update.
+
+These are intended controls. Their implementation status must be established through code review and testing.
+
+9. Security Testing and Quality Assurance
+
+Security testing should cover, as applicable:
+
+- Static analysis and secure coding checks.
+- Dependency vulnerability scanning.
+- Unit and integration tests for permission and authorization boundaries.
+- Tests for malformed APKs and archive traversal.
+- Tests for backup confidentiality and restore safety.
+- Tests for command injection and privileged-operation authorization.
+- Regression tests for every confirmed security vulnerability.
+- Review of release artifacts and signing configuration.
+
+Testing must be performed only on devices, applications, accounts, and environments that the tester owns or is explicitly authorized to assess.
+
+10. GitHub Repository Security
+
+Maintainers should enable and configure appropriate repository security features where available:
+
+- Private vulnerability reporting or a verified private reporting channel.
+- Dependency graph and Dependabot alerts.
+- Dependency update automation.
+- Code scanning, including CodeQL where supported.
+- Secret scanning and push protection where available.
+- Branch protection or repository rulesets.
+- Required review for changes to privileged code and release workflows.
+- Least-privilege GitHub Actions permissions.
+- Protection of release tags and signing secrets.
+
+Security features must be configured in repository settings and workflows; listing them in this policy does not enable them automatically.
+
+11. Security Advisories and Acknowledgments
+
+Confirmed vulnerabilities may be documented through GitHub Security Advisories and release notes, subject to coordinated disclosure.
+
+Researchers who responsibly disclose valid vulnerabilities may be acknowledged with their permission. Anonymous recognition is available upon request where practical.
+
+APZ Manager does not promise financial rewards or a bug bounty unless an official program is separately announced.
+
+12. User Responsibilities
+
+Users should:
+
+- Obtain releases from official project channels.
+- Keep APZ Manager and supported dependencies up to date.
+- Review requested permissions and privileged operations.
+- Avoid installing unverified APK files.
+- Protect backup archives and any associated encryption keys.
+- Avoid sharing logs or diagnostic files containing sensitive information.
+- Report suspected vulnerabilities privately.
+
+13. Policy Maintenance
+
+This policy should be reviewed periodically and whenever the application's security model, release process, or privileged integrations change.
+
+Policy changes do not imply that all listed controls have been implemented, independently audited, or certified.
+
+For questions about this policy, contact the repository maintainers through a verified project channel.
+
+---
+
+End of Security Policy
