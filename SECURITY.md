@@ -44,3 +44,4 @@ This security policy applies to the `APZ-MANAGER` repository and its official re
 ## Acknowledgments
 
 We appreciate the efforts of security researchers and users who help keep `APZ-MANAGER` safe. Responsible disclosures will be acknowledged in release notes unless the reporter requests anonymity.
+a
