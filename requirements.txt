@@ -1,0 +1,2 @@
+# No third-party Python package is required for the GUI/runtime.
+# tkinter is included with standard Windows Python installations.
