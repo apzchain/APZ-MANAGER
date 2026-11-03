@@ -1,6 +1,7 @@
 import json, os, re, hashlib, zipfile, threading, urllib.request, urllib.error
 from pathlib import Path
 import tkinter as tk
+from reputation_engine import MultiReputationEngine
 from tkinter import ttk, filedialog, messagebox
 
 APP = "APZ Manager Windows"
@@ -176,6 +177,7 @@ class App(tk.Tk):
         self.geometry("1180x760")
         self.minsize(950,650)
         self.report = None
+        self.reputation = None
         self._build()
 
     def _build(self):
@@ -193,6 +195,7 @@ class App(tk.Tk):
         ttk.Button(buttons, text="انتخاب و تحلیل APK", command=self.pick).pack(side="left", padx=4)
         ttk.Button(buttons, text="ذخیره گزارش JSON", command=self.save_report).pack(side="left", padx=4)
         ttk.Button(buttons, text="AI Assistant", command=self.ask_ai).pack(side="left", padx=4)
+        ttk.Button(buttons, text="Multi-Reputation", command=self.multi_reputation).pack(side="left", padx=4)
 
         self.score = ttk.Label(buttons, text="Risk: —", font=("Segoe UI", 12, "bold"))
         self.score.pack(side="right")
@@ -265,8 +268,32 @@ class App(tk.Tk):
         p = filedialog.asksaveasfilename(defaultextension=".json", initialfile="apz-security-report.json",
                                          filetypes=[("JSON","*.json")])
         if p:
-            Path(p).write_text(json.dumps(self.report, ensure_ascii=False, indent=2), encoding="utf-8")
+            export=dict(self.report)
+            if self.reputation: export["multi_reputation"]=self.reputation
+            Path(p).write_text(json.dumps(export, ensure_ascii=False, indent=2), encoding="utf-8")
             messagebox.showinfo("APZ Manager", "گزارش ذخیره شد.")
+
+
+    def multi_reputation(self):
+        if not self.report:
+            messagebox.showinfo("Reputation","ابتدا APK را تحلیل کنید."); return
+        self.text.insert("end","\n\nMulti-Reputation: در حال بررسی ۴ منبع…\n")
+        def work():
+            result=MultiReputationEngine().lookup(self.report["sha256"])
+            self.reputation=result
+            self.after(0,lambda:self.render_reputation(result))
+        threading.Thread(target=work,daemon=True).start()
+
+    def render_reputation(self,r):
+        self.text.insert("end","\n=== Multi-Source Reputation ===\n")
+        self.text.insert("end",f"Overall: {r['overall_verdict']} • Confidence: {r['confidence']}%\n")
+        for x in r["providers"]:
+            self.text.insert("end",f"\n[{x['provider']}] {x['status']} → {x['verdict']}\n")
+            if x.get("malicious") is not None:
+                self.text.insert("end",f"malicious={x.get('malicious',0)}, suspicious={x.get('suspicious',0)}, harmless={x.get('harmless',0)}, undetected={x.get('undetected',0)}\n")
+            if x.get("error"): self.text.insert("end",f"error={x['error']}\n")
+            if x.get("report_url"): self.text.insert("end",f"report={x['report_url']}\n")
+        self.text.insert("end","\nتوجه: موتور اجماع شواهد چند منبع را ترکیب می‌کند؛ نتیجه Reputation به‌تنهایی اثبات قطعی بدافزار نیست.\n")
 
     def ask_ai(self):
         if not self.report:
