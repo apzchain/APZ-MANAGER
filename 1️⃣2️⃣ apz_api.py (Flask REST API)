@@ -1,0 +1,104 @@
+"""APZ REST API server."""
+import os
+from flask import Flask, jsonify, request
+
+from apz_orchestrator import Orchestrator
+from database import Database
+from logger import get_logger
+
+log = get_logger("api")
+
+app = Flask(__name__)
+_orchestrator = None
+_db = None
+
+
+def _get_orchestrator():
+    global _orchestrator
+    if _orchestrator is None:
+        _orchestrator = Orchestrator()
+    return _orchestrator
+
+
+def _get_db():
+    global _db
+    if _db is None:
+        _db = Database()
+    return _db
+
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"})
+
+
+@app.route("/analyze", methods=["POST"])
+def analyze():
+    data = request.get_json(silent=True) or {}
+    path = data.get("apk_path")
+    if not path:
+        return jsonify({"error": "apk_path required"}), 400
+    if not os.path.isfile(path):
+        return jsonify({"error": "file not found"}), 404
+    try:
+        report = _get_orchestrator().analyze(path)
+        return jsonify(report)
+    except Exception as e:
+        log.exception("analyze failed")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/batch", methods=["POST"])
+def batch():
+    data = request.get_json(silent=True) or {}
+    paths = data.get("apk_paths", [])
+    if not isinstance(paths, list) or not paths:
+        return jsonify({"error": "apk_paths (list) required"}), 400
+    results = []
+    for p in paths:
+        try:
+            rep = _get_orchestrator().analyze(p)
+            results.append({
+                "file": p, "sha256": rep["sha256"],
+                "risk_score": rep["risk_score"], "risk_level": rep["risk_level"],
+            })
+        except Exception as e:
+            results.append({"file": p, "error": str(e)})
+    return jsonify({"results": results})
+
+
+@app.route("/summary/<sha256>")
+def summary(sha256):
+    s = _get_db().get_summary(sha256)
+    if not s:
+        return jsonify({"error": "not found"}), 404
+    return jsonify(s)
+
+
+@app.route("/stats")
+def stats():
+    return jsonify(_get_db().get_stats())
+
+
+@app.route("/metrics")
+def metrics():
+    s = _get_db().get_stats()
+    lines = [
+        "# HELP apz_analyses_total Total analyses",
+        "# TYPE apz_analyses_total counter",
+        f"apz_analyses_total {s.get('total', 0)}",
+    ]
+    for level, count in s.get("by_level", {}).items():
+        lines.append(f'apz_analyses_by_level{{level="{level}"}} {count}')
+    return "\n".join(lines) + "\n", 200, {"Content-Type": "text/plain; version=0.0.4"}
+
+
+def run_server():
+    host = os.environ.get("APZ_HTTP_HOST", "0.0.0.0")
+    port = int(os.environ.get("APZ_HTTP_PORT", "5000"))
+    log.info(f"Starting APZ API on {host}:{port}")
+    app.run(host=host, port=port)
+
+
+if __name__ == "__main__":
+    run_server()
