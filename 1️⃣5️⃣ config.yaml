@@ -1,0 +1,29 @@
+analysis:
+  max_file_size_mb: 500
+  max_strings: 5000
+  timeout_seconds: 300
+
+risk_fusion:
+  weights:
+    reputation: 0.25
+    yara: 0.20
+    ioc: 0.15
+    manifest: 0.15
+    mitre: 0.10
+    certificate: 0.08
+    sandbox: 0.07
+
+reputation:
+  timeout_seconds: 30
+
+ai:
+  enabled: false
+  backend: ollama
+  summarize: true
+  explain_risk: true
+  recommend: true
+  family_classification: true
+
+reporting:
+  formats: [json, html]
+  include_raw: false
