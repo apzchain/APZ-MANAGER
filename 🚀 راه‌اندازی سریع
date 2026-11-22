@@ -1,0 +1,26 @@
+# 1) نصب وابستگی‌ها
+pip install -r requirements.txt
+
+# 2) ساخت پوشه‌ی قوانین (اگر وجود ندارد)
+mkdir -p rules
+
+# 3) تحلیل یک APK
+python apz_manager.py --file /path/to/app.apk --format json html
+
+# 4) اجرای GUI (بدون آرگومان)
+python apz_manager.py
+
+# 5) اجرای REST API
+python apz_manager.py --api
+curl http://localhost:5000/stats
+
+# 6) با AI محلی (Ollama روی localhost:11434)
+export APZ_AI_ENABLED=1
+export OLLAMA_HOST=http://localhost:11434
+python apz_manager.py --file app.apk --ai
+
+# 7) با کلیدهای Reputation
+export APZ_VT_API_KEY=xxxxx
+export APZ_HA_API_KEY=yyyyy
+export APZ_MD_API_KEY=zzzzz
+python apz_manager.py --file app.apk
