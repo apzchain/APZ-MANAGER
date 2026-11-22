@@ -1,0 +1,34 @@
+APK ?= $(HOME)/Download/app.apk
+OUTDIR ?= $(HOME)/apz-reports
+PYTHON ?= python3
+LIST ?= list.txt
+
+.PHONY: install install-android run batch api gui test clean storage
+
+install:
+	$(PYTHON) -m pip install -r requirements.txt
+
+install-android:
+	pkg install -y python git make || true
+	$(PYTHON) -m pip install -r requirements-android.txt
+
+storage:
+	termux-setup-storage || true
+
+run:
+	$(PYTHON) apz_manager.py --file "$(APK)" --outdir "$(OUTDIR)"
+
+batch:
+	$(PYTHON) apz_manager.py --batch "$(LIST)" --outdir "$(OUTDIR)"
+
+api:
+	$(PYTHON) apz_manager.py --api
+
+gui:
+	$(PYTHON) apz_manager.py --gui
+
+test:
+	pytest -q tests/ || true
+
+clean:
+	rm -rf __pycache__ */__pycache__ .pytest_cache
