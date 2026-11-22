@@ -1,0 +1,171 @@
+"""APZ Manager – CLI + optional GUI entry point."""
+import argparse
+import json
+import os
+import sys
+
+from apz_orchestrator import Orchestrator
+from logger import get_logger
+from report_generator import generate as generate_reports
+
+log = get_logger("main")
+
+
+def cmd_cli(args):
+    orch = Orchestrator(
+        db_path=False if args.no_db else None,
+        rules_dir=args.rules_dir,
+        enable_ai=args.ai,
+        enable_reputation=not args.no_reputation,
+    )
+    report = orch.analyze(args.file)
+    written = generate_reports(report, args.outdir, formats=tuple(args.format))
+    for k, v in written.items():
+        log.info(f"{k}: {v}")
+    if args.output:
+        with open(args.output, "w", encoding="utf-8") as f:
+            json.dump(report, f, ensure_ascii=False, indent=2)
+    print(json.dumps({
+        "sha256": report["sha256"],
+        "risk_score": report["risk_score"],
+        "risk_level": report["risk_level"],
+        "confidence": report["confidence"],
+        "reports": written,
+    }, indent=2, ensure_ascii=False))
+
+
+def cmd_batch(args):
+    with open(args.batch) as f:
+        paths = [line.strip() for line in f
+                 if line.strip() and not line.startswith("#")]
+    orch = Orchestrator(
+        db_path=False if args.no_db else None,
+        rules_dir=args.rules_dir,
+        enable_ai=args.ai,
+        enable_reputation=not args.no_reputation,
+    )
+    summaries = []
+    for i, p in enumerate(paths, 1):
+        log.info(f"[{i}/{len(paths)}] {p}")
+        try:
+            rep = orch.analyze(p)
+            generate_reports(rep, args.outdir, formats=("json", "html"))
+            summaries.append({
+                "file": p, "sha256": rep["sha256"],
+                "risk_score": rep["risk_score"], "risk_level": rep["risk_level"],
+            })
+        except Exception as e:
+            log.error(f"failed: {p}: {e}")
+            summaries.append({"file": p, "error": str(e)})
+    if args.output:
+        with open(args.output, "w") as f:
+            json.dump(summaries, f, indent=2)
+    print(json.dumps(summaries, indent=2, ensure_ascii=False))
+
+
+def cmd_gui(args):
+    try:
+        import tkinter as tk
+        from tkinter import filedialog, messagebox, ttk
+    except ImportError:
+        log.error("tkinter not available")
+        sys.exit(1)
+
+    root = tk.Tk()
+    root.title("APZ Manager – APK Security Analysis")
+    root.geometry("900x650")
+
+    tk.Label(root, text="🛡️ APZ Manager",
+             font=("TkDefaultFont", 18, "bold")).pack(pady=10)
+    tk.Label(root, text="Select an APK to analyze").pack()
+
+    progress = ttk.Progressbar(root, mode="indeterminate", length=400)
+    progress.pack(pady=10)
+
+    tree = ttk.Treeview(root, columns=("weight", "detail"), show="tree headings")
+    tree.heading("#0", text="Finding")
+    tree.heading("weight", text="Weight")
+    tree.heading("detail", text="Detail")
+    tree.column("#0", width=280)
+    tree.column("weight", width=80)
+    tree.column("detail", width=440)
+    tree.pack(fill="both", expand=True, padx=10, pady=10)
+
+    status = tk.Label(root, text="Ready", anchor="w")
+    status.pack(fill="x", padx=10, pady=5)
+
+    def do_analyze():
+        path = filedialog.askopenfilename(
+            title="Select APK",
+            filetypes=[("APK files", "*.apk"), ("All files", "*.*")],
+        )
+        if not path:
+            return
+        for i in tree.get_children():
+            tree.delete(i)
+        progress.start(10)
+        status.config(text=f"Analyzing {path}...")
+        root.update()
+        try:
+            orch = Orchestrator(rules_dir=args.rules_dir, enable_ai=args.ai)
+            report = orch.analyze(path)
+            generate_reports(report, args.outdir, formats=("json", "html"))
+            for f in report.get("findings", []):
+                tree.insert("", "end",
+                            text=f.get("title_fa", f.get("category", "")),
+                            values=(f.get("weight", 0), f.get("detail_fa", "")))
+            status.config(text=f"Done — {report['risk_level']} "
+                               f"({report['risk_score']}/100) "
+                               f"Confidence: {report['confidence']}%")
+            messagebox.showinfo("Analysis Complete",
+                                f"Risk: {report['risk_level']}\n"
+                                f"Score: {report['risk_score']}\n"
+                                f"Confidence: {report['confidence']}%")
+        except Exception as e:
+            status.config(text=f"Error: {e}")
+            messagebox.showerror("Error", str(e))
+        finally:
+            progress.stop()
+
+    bar = tk.Frame(root)
+    bar.pack(pady=5)
+    tk.Button(bar, text="Select & Analyze APK", command=do_analyze,
+              bg="#2563eb", fg="white", padx=15, pady=5).pack(side="left", padx=5)
+    tk.Button(bar, text="Quit", command=root.quit,
+              padx=15, pady=5).pack(side="left", padx=5)
+
+    root.mainloop()
+
+
+def main():
+    ap = argparse.ArgumentParser(description="APZ Manager – APK Security Analysis")
+    ap.add_argument("--file", help="APK file to analyze")
+    ap.add_argument("--batch", help="File with list of APK paths (one per line)")
+    ap.add_argument("--output", help="Output JSON path")
+    ap.add_argument("--outdir", default=os.environ.get(
+        "APZ_DEFAULT_OUTDIR", os.path.expanduser("~/apz-reports")))
+    ap.add_argument("--format", nargs="*", choices=["json", "html", "pdf"],
+                    default=["json", "html"])
+    ap.add_argument("--rules-dir", default="rules")
+    ap.add_argument("--ai", action="store_true", help="Enable AI enrichment")
+    ap.add_argument("--no-db", action="store_true")
+    ap.add_argument("--no-reputation", action="store_true")
+    ap.add_argument("--api", action="store_true", help="Run REST API")
+    ap.add_argument("--gui", action="store_true", help="Launch GUI")
+    args = ap.parse_args()
+
+    if args.api:
+        from apz_api import run_server
+        run_server()
+    elif args.gui or (not args.file and not args.batch):
+        cmd_gui(args)
+    elif args.file:
+        cmd_cli(args)
+    elif args.batch:
+        cmd_batch(args)
+    else:
+        ap.print_help()
+
+
+if __name__ == "__main__":
+    main()
