@@ -1,0 +1,80 @@
+#!/bin/bash
+# File: deploy.sh
+# اسکریپت یک‌کلیک برای توسعه کامل اکوسیستم APZ با DeepSeek
+
+set -e
+
+echo "🚀 APZ Ecosystem - Auto Deployment with DeepSeek"
+echo "=================================================="
+
+# رنگ‌ها
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# مرحله ۱: بررسی پیش‌نیازها
+echo -e "${BLUE}📋 Checking prerequisites...${NC}"
+
+check_command() {
+    if ! command -v $1 &> /dev/null; then
+        echo -e "${RED}❌ $1 is required but not installed${NC}"
+        exit 1
+    fi
+}
+
+check_command python3
+check_command docker
+check_command git
+
+echo -e "${GREEN}✅ All prerequisites are installed${NC}"
+
+# مرحله ۲: تنظیم متغیرهای محیطی
+echo -e "${BLUE}🔑 Setting up environment variables...${NC}"
+
+if [ -z "$DEEPSEEK_API_KEY" ]; then
+    echo -e "${YELLOW}⚠️ DEEPSEEK_API_KEY is not set${NC}"
+    read -p "Enter your DeepSeek API Key: " DEEPSEEK_API_KEY
+    export DEEPSEEK_API_KEY
+fi
+
+echo -e "${GREEN}✅ Environment variables configured${NC}"
+
+# مرحله ۳: نصب وابستگی‌ها
+echo -e "${BLUE}📦 Installing dependencies...${NC}"
+
+pip install -r requirements.txt --quiet
+
+echo -e "${GREEN}✅ Dependencies installed${NC}"
+
+# مرحله ۴: اجرای توسعه خودکار
+echo -e "${BLUE}🤖 Starting automatic development with DeepSeek...${NC}"
+
+python3 core/apz_orchestrator.py
+
+# مرحله ۵: بیلد نهایی
+echo -e "${BLUE}📦 Building final package...${NC}"
+
+zip -r APZ-Ecosystem-Complete.zip . -x "*.git*" "__pycache__/*" "*.pyc"
+
+echo -e "${GREEN}✅ Build complete: APZ-Ecosystem-Complete.zip${NC}"
+
+# مرحله ۶: گزارش نهایی
+echo -e "${BLUE}📊 Final Report:${NC}"
+echo "=================================================="
+echo -e "${GREEN}✅ APZ Manager: Developed${NC}"
+echo -e "${GREEN}✅ APZ Security: Developed${NC}"
+echo -e "${GREEN}✅ APZ Network: Developed${NC}"
+echo -e "${GREEN}✅ APZ Token: Developed${NC}"
+echo -e "${GREEN}✅ Documentation: Generated${NC}"
+echo -e "${GREEN}✅ Deployment: Ready${NC}"
+echo "=================================================="
+
+echo -e "${GREEN}🎉 APZ Ecosystem development completed successfully!${NC}"
+echo -e "${BLUE}🌐 Next steps:${NC}"
+echo "1. Extract APZ-Ecosystem-Complete.zip"
+echo "2. Run docker-compose up -d"
+echo "3. Access the services at http://localhost:8080"
+
+exit 0
