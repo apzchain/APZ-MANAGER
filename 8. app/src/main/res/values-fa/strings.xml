@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">مدیر APZ</string>
+    <string name="home_title">مدیر APZ</string>
+    <string name="install">نصب</string>
+    <string name="cleanup">پاکسازی</string>
+    <string name="search_hint">جستجوی اپلیکیشن...</string>
+</resources>
