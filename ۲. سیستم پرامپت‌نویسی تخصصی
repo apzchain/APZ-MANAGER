@@ -1,0 +1,258 @@
+# File: core/apz_prompts.py
+"""
+سیستم پرامپت‌نویسی پیشرفته برای هر بخش اکوسیستم
+"""
+
+from typing import Dict, Any
+import json
+
+class APZPromptSystem:
+    """سیستم تولید پرامپت‌های تخصصی"""
+    
+    @staticmethod
+    def get_manager_prompt(specs: Dict[str, Any] = None) -> str:
+        """پرامپت تخصصی برای APZ Manager"""
+        return f"""
+        🚀 **توسعه کامل APZ Manager با Kotlin و Jetpack Compose**
+        
+        ## 📋 مشخصات کلی:
+        1. **معماری**: Clean Architecture + MVVM
+        2. **UI**: Jetpack Compose با Material Design 3
+        3. **دیتابیس**: Room با پشتیبانی از Flow
+        4. **DI**: Koin یا Hilt
+        5. **پشتیبانی**: Android 13+
+        
+        ## 🎯 قابلیت‌های اصلی:
+        1. **مدیریت اپلیکیشن‌ها**
+           - لیست کامل با جستجو و فیلتر
+           - نمایش جزئیات کامل
+           - تحلیل امنیتی پیشرفته
+        
+        2. **نصب و حذف**
+           - نصب APK با تحلیل امنیتی
+           - حذف ایمن با تأیید کاربر
+           - مدیریت مجوزها
+        
+        3. **بکاپ و بازگردانی**
+           - بکاپ کامل (APK + Data + OBB)
+           - رمزنگاری AES-256
+           - بازگردانی هوشمند
+        
+        4. **پاکسازی**
+           - شناسایی فایل‌های بزرگ
+           - پاکسازی کش
+           - حذف فایل‌های باقیمانده
+        
+        5. **امنیت**
+           - تحلیل مجوزها
+           - امتیازدهی ریسک
+           - تشخیص تهدید
+        
+        ## 🔧 تکنولوژی‌ها:
+        - Kotlin 1.9+
+        - Jetpack Compose 1.5+
+        - Room 2.6+
+        - Shizuku 13.1+
+        - Biometric 1.1+
+        
+        ## 📁 ساختار فایل‌های مورد نیاز:
+        - MainActivity.kt
+        - HomeScreen.kt
+        - AppDetailsScreen.kt
+        - InstallScreen.kt
+        - BackupScreen.kt
+        - CleanupScreen.kt
+        - SettingsScreen.kt
+        - ViewModel ها
+        - Repository ها
+        - Use Cases
+        - تست‌ها
+        
+        لطفاً کد کامل و اجرایی با تمام فایل‌های مورد نیاز تولید کنید.
+        {json.dumps(specs or {}, indent=2)}
+        """
+    
+    @staticmethod
+    def get_security_prompt(specs: Dict[str, Any] = None) -> str:
+        """پرامپت تخصصی برای APZ Security"""
+        return f"""
+        🛡️ **توسعه کامل APZ Security Framework با Python/Rust**
+        
+        ## 📋 مشخصات کلی:
+        1. **معماری**: Microservices + Event-Driven
+        2. **زبان اصلی**: Python با هسته Rust
+        3. **رمزنگاری**: Hybrid (AES-256 + RSA-4096)
+        4. **ذخیره‌سازی**: Redis + PostgreSQL
+        
+        ## 🎯 قابلیت‌های اصلی:
+        1. **موتور تحلیل ریسک**
+           - الگوریتم‌های ML برای تشخیص تهدید
+           - امتیازدهی پویا
+           - تحلیل رفتاری
+        
+        2. **سیستم تشخیص تهدید**
+           - Signature-based Detection
+           - Anomaly Detection
+           - Zero-day Protection
+        
+        3. **رمزنگاری پیشرفته**
+           - AES-256-GCM
+           - RSA-4096
+           - Post-Quantum Ready
+        
+        4. **احراز هویت**
+           - MFA (Biometric + OTP)
+           - Zero-Knowledge Proofs
+           - Secure Enclave
+        
+        5. **ممیزی و گزارش‌دهی**
+           - Auto Audit
+           - Compliance Reports
+           - Real-time Monitoring
+        
+        ## 🔧 تکنولوژی‌ها:
+        - Python 3.11+
+        - Rust 1.7+
+        - FastAPI
+        - PyCryptodome
+        - Redis
+        - PostgreSQL
+        
+        ## 📁 ساختار فایل‌های مورد نیاز:
+        - risk_engine.py
+        - threat_detector.py
+        - encryption_manager.py
+        - mfa_manager.py
+        - audit_logger.py
+        - api/main.py
+        - tests/
+        - Cargo.toml (برای Rust modules)
+        
+        لطفاً کد کامل و اجرایی تولید کنید.
+        {json.dumps(specs or {}, indent=2)}
+        """
+    
+    @staticmethod
+    def get_network_prompt(specs: Dict[str, Any] = None) -> str:
+        """پرامپت تخصصی برای APZ Network"""
+        return f"""
+        🌐 **توسعه کامل APZ Decentralized Network با Go/JavaScript**
+        
+        ## 📋 مشخصات کلی:
+        1. **معماری**: Blockchain + P2P Network
+        2. **زبان اصلی**: Go + Node.js
+        3. **بلاک‌چین**: Hyperledger Fabric
+        4. **ذخیره‌سازی**: IPFS + LevelDB
+        
+        ## 🎯 قابلیت‌های اصلی:
+        1. **بلاک‌چین**
+           - Custom Blockchain
+           - PoS Consensus
+           - Smart Contracts (Solidity)
+        
+        2. **شبکه P2P**
+           - Gossip Protocol
+           - DHT (Distributed Hash Table)
+           - NAT Traversal
+        
+        3. **سیستم هویت**
+           - DID (Decentralized Identity)
+           - Verifiable Credentials
+           - KYC Integration
+        
+        4. **ذخیره‌سازی توزیع‌شده**
+           - IPFS Integration
+           - Filecoin Backup
+           - Content Addressing
+        
+        5. **پروتکل ارتباطی**
+           - gRPC + Protobuf
+           - WebSocket for Real-time
+           - RESTful API
+        
+        ## 🔧 تکنولوژی‌ها:
+        - Go 1.21+
+        - Node.js 20+
+        - Hyperledger Fabric
+        - IPFS
+        - gRPC
+        - Docker + Kubernetes
+        
+        ## 📁 ساختار فایل‌های مورد نیاز:
+        - blockchain/core.go
+        - p2p/network.go
+        - identity/did_manager.go
+        - storage/ipfs_client.go
+        - api/grpc_server.go
+        - smart-contracts/
+        - tests/
+        
+        لطفاً کد کامل و اجرایی تولید کنید.
+        {json.dumps(specs or {}, indent=2)}
+        """
+    
+    @staticmethod
+    def get_token_prompt(specs: Dict[str, Any] = None) -> str:
+        """پرامپت تخصصی برای APZ Token"""
+        return f"""
+        💰 **توسعه کامل APZ Token Economy با Solidity**
+        
+        ## 📋 مشخصات کلی:
+        1. **پلتفرم**: Ethereum + Layer 2
+        2. **زبان**: Solidity 0.8.20+
+        3. **استاندارد**: ERC-20 + ERC-223
+        4. **فریم‌ورک**: Hardhat + OpenZeppelin
+        
+        ## 🎯 قابلیت‌های اصلی:
+        1. **توکن APZ**
+           - Name: APZ Token
+           - Symbol: APZ
+           - Decimals: 18
+           - Total Supply: 1,000,000,000
+        
+        2. **توزیع توکن**
+           - Community: 40%
+           - Developers: 15%
+           - Foundation: 10%
+           - Team: 15%
+           - Ecosystem: 20%
+        
+        3. **استیکینگ**
+           - Single Asset Staking
+           - LP Staking
+           - Reward Distribution
+        
+        4. **حاکمیت**
+           - DAO Structure
+           - Proposal System
+           - Voting Mechanism
+        
+        5. **اقتصاد**
+           - Token Burn
+           - Buy-back Mechanism
+           - Revenue Sharing
+        
+        6. **صرافی غیرمتمرکز**
+           - Custom DEX
+           - Liquidity Pools
+           - Swaps
+        
+        ## 🔧 تکنولوژی‌ها:
+        - Solidity 0.8.20+
+        - Hardhat
+        - OpenZeppelin
+        - Ethers.js
+        - TypeScript
+        
+        ## 📁 ساختار فایل‌های مورد نیاز:
+        - contracts/APZToken.sol
+        - contracts/Staking.sol
+        - contracts/Governance.sol
+        - contracts/DEX.sol
+        - test/
+        - scripts/deploy.js
+        - hardhat.config.js
+        
+        لطفاً کد کامل و اجرایی تولید کنید.
+        {json.dumps(specs or {}, indent=2)}
+        """
